@@ -1,0 +1,6 @@
+Shipping Policy
+
+1. Standard delivery usually takes 3-7 business days.
+2. Customers can request tracking updates after 24 hours from order dispatch.
+3. If an order is delayed, support should apologize and offer updated ETA.
+4. For lost shipments, create an escalation ticket and offer replacement or refund options.

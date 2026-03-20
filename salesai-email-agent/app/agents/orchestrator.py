@@ -14,8 +14,12 @@ from app.rag.retrieval import retrieve_top_k
 def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[str, str]:
     """Process one customer email through NLP, RAG, strategy, and generation."""
     normalized_text = preprocess_text(body)
-    intent = classify_intent(normalized_text)
-    emotion = detect_emotion(normalized_text)
+    intent_data = classify_intent(normalized_text)
+    intent = intent_data["intent"]
+    intent_confidence = intent_data["confidence"]
+    emotion_data = detect_emotion(normalized_text)
+    emotion = emotion_data["emotion"]
+    emotion_confidence = emotion_data["confidence"]
 
     query = f"subject: {subject}\nmessage: {normalized_text}"
     context_docs = retrieve_top_k(query=query, k=2)
@@ -34,7 +38,9 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
             "customer_email": customer_email,
             "subject": subject,
             "intent": intent,
+            "intent_confidence": intent_confidence,
             "emotion": emotion,
+            "emotion_confidence": emotion_confidence,
             "strategy": strategy,
             "reply": reply,
         }
@@ -42,7 +48,9 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
 
     return {
         "intent": intent,
+        "intent_confidence": intent_confidence,
         "emotion": emotion,
+        "emotion_confidence": emotion_confidence,
         "strategy": strategy,
         "reply": reply,
     }

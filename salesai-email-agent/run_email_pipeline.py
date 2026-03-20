@@ -12,6 +12,8 @@ import time
 from typing import Dict, List
 
 from app.email.fetch_emails import fetch_unread_emails
+from app.nlp.emotion import detect_emotion_for_email
+from app.nlp.intent import classify_intent_for_email
 
 
 def clean_text(text: str) -> str:
@@ -35,6 +37,11 @@ def _print_email(email: Dict[str, str]) -> None:
     body = clean_text(email.get("body", ""))
     if not body:
         body = "[No readable body content]"
+
+    intent_result = classify_intent_for_email(email_id=email_id, text=body)
+    emotion_result = detect_emotion_for_email(email_id=email_id, text=body)
+    print(f"INTENT: {intent_result['intent']} ({intent_result['confidence']})")
+    print(f"EMOTION: {emotion_result['emotion']} ({emotion_result['confidence']})")
 
     print("-" * 40)
     print("EMAIL RECEIVED")

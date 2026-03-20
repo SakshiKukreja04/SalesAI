@@ -3,10 +3,10 @@
 
 def select_strategy(intent: str, emotion: str) -> str:
     """Return a reply strategy label used by the response generator."""
-    if emotion == "negative":
+    if emotion in {"frustrated", "angry", "urgent"}:
         return "empathetic"
-    if intent == "refund_request":
+    if intent == "Refund Request":
         return "policy_focused"
-    if intent == "shipping_query":
+    if intent == "Order Status":
         return "tracking_focused"
     return "general_helpful"

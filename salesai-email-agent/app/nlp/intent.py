@@ -35,16 +35,9 @@ def _model_candidates_from_env() -> list[str]:
         "models/gemini-2.0-flash",
         "gemini-2.0-flash-lite",
         "models/gemini-2.0-flash-lite",
-        "gemini-2.0-pro",
-        "models/gemini-2.0-pro",
         "gemini-1.5-flash",
         "models/gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "models/gemini-1.5-pro",
-        "gemini-pro",
-        "models/gemini-pro",
         "gemini-1.5-flash-latest",
-        "gemini-1.5-pro-latest",
     ]
     return [name for name in candidates if name]
 

@@ -12,14 +12,28 @@ import re
 import time
 from typing import Dict, List
 
+from app.agents.orchestrator import handle_customer_email
 from app.db.supabase_client import create_table_if_not_exists, insert_email_data
 from app.email.fetch_emails import fetch_unread_emails
+from app.email.send_email import send_email
 from app.nlp.emotion import detect_emotion_for_email
 from app.nlp.intent import classify_intent_for_email
+from app.rag.chroma_store import ensure_collection, seed_knowledge_from_folder
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def _extract_sender_email(sender_value: str) -> str:
+    """Extract plain email address from Gmail From header value."""
+    if not sender_value:
+        return ""
+
+    match = re.search(r"<([^>]+)>", sender_value)
+    if match:
+        return match.group(1).strip()
+    return sender_value.strip()
 
 
 def clean_text(text: str) -> str:
@@ -82,9 +96,11 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
     `interval` seconds.
     """
     try:
+        ensure_collection()
+        seed_knowledge_from_folder("data/knowledge")
         create_table_if_not_exists()
     except Exception:
-        logger.exception("Failed to ensure customer_emails table exists. Aborting pipeline.")
+        logger.exception("Failed to initialize RAG/DB resources. Aborting pipeline.")
         return
 
     while True:
@@ -110,6 +126,29 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
                         logger.info("Email data stored: id=%s", processed.get("id"))
                     else:
                         logger.info("Email already exists. Skipped id=%s", processed.get("id"))
+                        continue
+
+                    customer_email = _extract_sender_email(processed.get("from", ""))
+                    if not customer_email:
+                        logger.warning("Could not parse sender email for id=%s", processed.get("id"))
+                        continue
+
+                    result = handle_customer_email(
+                        customer_email=customer_email,
+                        subject=processed.get("subject", ""),
+                        body=processed.get("body", ""),
+                    )
+
+                    sent = send_email(
+                        to_email=customer_email,
+                        subject=f"Re: {processed.get('subject', '')}".strip(),
+                        body=result.get("reply", ""),
+                    )
+
+                    if sent:
+                        logger.info("Reply sent to %s for email id=%s", customer_email, processed.get("id"))
+                    else:
+                        logger.error("Reply failed to send to %s for email id=%s", customer_email, processed.get("id"))
                 except Exception:
                     logger.exception("Failed to process and store email id=%s", email.get("id", "unknown"))
 

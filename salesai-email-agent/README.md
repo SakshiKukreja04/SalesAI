@@ -68,6 +68,17 @@ python -m spacy download en_core_web_sm
 
 3. Fill `.env` with your credentials (optional for mock mode).
 
+Example SMTP configuration for Gmail App Password:
+
+```env
+SMTP_SERVER=smtp.gmail.com
+SMTP_PORT=587
+SMTP_EMAIL=your_email@gmail.com
+SMTP_PASSWORD=your_16_char_app_password
+SMTP_MOCK_MODE=false
+REPLY_SIGNATURE=Best regards,\nCustomer Support Team
+```
+
 4. Run the API.
 
 ```bash

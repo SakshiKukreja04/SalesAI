@@ -2,13 +2,47 @@ import logging
 import os
 from typing import Dict, Any, Optional
 
-import psycopg2
-from psycopg2 import DatabaseError, OperationalError
 from dotenv import load_dotenv
+
+try:
+    import psycopg2
+    from psycopg2 import DatabaseError, OperationalError
+except ImportError:  # pragma: no cover - environment-dependent import
+    psycopg2 = None
+
+    class DatabaseError(Exception):
+        """Fallback DB error type when psycopg2 is unavailable."""
+
+    class OperationalError(Exception):
+        """Fallback operational error type when psycopg2 is unavailable."""
 
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def map_confidence(conf: Any) -> float:
+    """Convert confidence labels or numeric-like inputs to a DB-safe float."""
+    mapping = {
+        "high": 0.9,
+        "medium": 0.6,
+        "low": 0.3,
+    }
+
+    if conf is None:
+        return 0.5
+
+    if isinstance(conf, (int, float)):
+        return float(conf)
+
+    key = str(conf).strip().lower()
+    if key in mapping:
+        return mapping[key]
+
+    try:
+        return float(key)
+    except ValueError:
+        return 0.5
 
 
 def _load_env() -> None:
@@ -18,9 +52,15 @@ def _load_env() -> None:
         _load_env.loaded = True
 
 
-def get_connection() -> Optional[psycopg2.extensions.connection]:
+def get_connection() -> Optional[Any]:
     """Create and return a PostgreSQL connection from environment variables."""
     _load_env()
+
+    if psycopg2 is None:
+        logger.warning(
+            "psycopg2 is not installed. Install dependencies from requirements.txt to enable DB logging."
+        )
+        return None
 
     db_url = os.getenv("SUPABASE_DB_URL") or os.getenv("SUPABASE_URL")
     if not db_url:
@@ -143,7 +183,7 @@ def insert_email_data(email_data: Dict[str, Any]) -> bool:
 
 
 def _create_interactions_table_if_not_exists(
-    conn: psycopg2.extensions.connection,
+    conn: Any,
 ) -> None:
     """Ensure the interactions table exists before inserts."""
     create_table_query = """
@@ -189,9 +229,9 @@ def log_interaction(interaction: Dict[str, Any]) -> None:
         interaction.get("customer_email"),
         interaction.get("subject"),
         interaction.get("intent"),
-        interaction.get("intent_confidence"),
+        map_confidence(interaction.get("intent_confidence")),
         interaction.get("emotion"),
-        interaction.get("emotion_confidence"),
+        map_confidence(interaction.get("emotion_confidence")),
         interaction.get("strategy"),
         interaction.get("reply"),
     )

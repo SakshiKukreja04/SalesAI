@@ -39,5 +39,12 @@ class Settings:
     supabase_key: str = os.getenv("SUPABASE_KEY", "")
     supabase_table: str = os.getenv("SUPABASE_TABLE", "email_logs")
 
+    supabase_db_url: str = os.getenv("SUPABASE_DB_URL", "")
+
+
+def get_env_var(name: str, default: str = "") -> str:
+    """Get an environment variable with an optional default value."""
+    return os.getenv(name, default)
+
 
 settings = Settings()

@@ -105,8 +105,11 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
             for email in emails:
                 try:
                     processed = _process_email(email)
-                    insert_email_data(processed)
-                    logger.info("Email data stored: id=%s", processed.get("id"))
+                    inserted = insert_email_data(processed)
+                    if inserted:
+                        logger.info("Email data stored: id=%s", processed.get("id"))
+                    else:
+                        logger.info("Email already exists. Skipped id=%s", processed.get("id"))
                 except Exception:
                     logger.exception("Failed to process and store email id=%s", email.get("id", "unknown"))
 

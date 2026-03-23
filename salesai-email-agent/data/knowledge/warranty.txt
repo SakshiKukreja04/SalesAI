@@ -1,9 +1,35 @@
-Warranty Policy:
+ShopiFyX Warranty Policy
 
-1. All products come with a standard warranty of 12 months from the date of delivery.
-2. The warranty covers manufacturing defects and hardware malfunctions.
-3. Warranty does not cover physical damage, misuse, or unauthorized repairs.
-4. Customers must provide proof of purchase to claim warranty services.
-5. In case of defects, customers can request repair or replacement.
-6. Warranty claims are processed within 5-7 business days after verification.
-7. For urgent cases, support may prioritize warranty handling.
+1. Warranty Coverage
+Selected electronics and accessories come with warranty.
+
+2. Warranty Period
+- Electronics: 6 months to 1 year
+- Accessories: 3 to 6 months
+
+3. Warranty Includes
+- Manufacturing defects
+- Technical malfunction
+- Hardware failure
+
+4. Warranty Excludes
+- Physical damage
+- Water damage
+- Misuse
+- Unauthorized repair
+
+5. Warranty Claim Process
+- Contact support
+- Provide order ID
+- Provide product images
+- Verification
+- Replacement or repair
+
+6. Warranty Replacement
+Replacement provided if product cannot be repaired.
+
+7. Warranty Service Time
+5-10 business days.
+
+8. Warranty Proof
+Invoice is required for warranty claim.

@@ -249,3 +249,184 @@ def log_interaction(interaction: Dict[str, Any]) -> None:
         conn.close()
         logger.debug("PostgreSQL connection closed after log_interaction")
 
+
+def _create_email_records_table_if_not_exists(conn: Any) -> None:
+    """Ensure the email_records table exists for email processing tracking."""
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS email_records (
+        id SERIAL PRIMARY KEY,
+        sender TEXT,
+        subject TEXT,
+        body TEXT,
+        intent TEXT,
+        emotion TEXT,
+        reply TEXT,
+        confidence DOUBLE PRECISION,
+        status TEXT,
+        escalation_reason TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+    
+    create_index_query = """
+    CREATE INDEX IF NOT EXISTS idx_email_records_status
+    ON email_records (status)
+    """
+    
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(create_table_query)
+            cursor.execute(create_index_query)
+        conn.commit()
+        logger.debug("Email records table ensured")
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed to create email_records table: %s", exc)
+        raise
+
+
+def save_email_record(
+    sender: str,
+    subject: str,
+    body: str,
+    intent: str,
+    emotion: str,
+    reply: str,
+    status: str,
+    confidence: float = 0.0,
+    escalation_reason: str = "",
+) -> bool:
+    """Save email processing record to database.
+    
+    Args:
+        sender: Customer email address
+        subject: Email subject
+        body: Email body
+        intent: Classified intent
+        emotion: Detected emotion
+        reply: Generated reply
+        status: Processing status ("replied", "escalated", "failed")
+        confidence: Confidence score of the reply
+        escalation_reason: Reason for escalation (if applicable)
+    
+    Returns:
+        True if record was saved successfully, False otherwise.
+    """
+    if status not in {"replied", "escalated", "failed"}:
+        logger.error("Invalid status '%s'; must be one of: replied, escalated, failed", status)
+        return False
+    
+    conn = get_connection()
+    if conn is None:
+        logger.warning(
+            "DB unavailable. Email record fallback log: sender=%s, status=%s",
+            sender,
+            status,
+        )
+        return False
+    
+    insert_query = """
+    INSERT INTO email_records (
+        sender,
+        subject,
+        body,
+        intent,
+        emotion,
+        reply,
+        confidence,
+        status,
+        escalation_reason
+    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+    
+    values = (
+        sender,
+        subject,
+        body,
+        intent,
+        emotion,
+        reply,
+        confidence,
+        status,
+        escalation_reason,
+    )
+    
+    try:
+        _create_email_records_table_if_not_exists(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(insert_query, values)
+        conn.commit()
+        logger.info("Email record saved (sender=%s, status=%s)", sender, status)
+        return True
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed to save email record: %s", exc)
+        return False
+    finally:
+        conn.close()
+        logger.debug("PostgreSQL connection closed after save_email_record")
+
+
+def get_email_records(limit: int = 100) -> list[dict]:
+    """Fetch recent email records from the email_records table.
+    
+    Args:
+        limit: Maximum number of records to fetch (default 100)
+    
+    Returns:
+        List of email records sorted by creation time (newest first)
+    """
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable. Cannot fetch email records")
+        return []
+    
+    query = """
+    SELECT 
+        id,
+        sender,
+        subject,
+        body,
+        intent,
+        emotion,
+        reply,
+        confidence,
+        status,
+        escalation_reason,
+        created_at
+    FROM email_records
+    ORDER BY created_at DESC
+    LIMIT %s
+    """
+    
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (limit,))
+            rows = cursor.fetchall()
+        
+        records = []
+        for row in rows:
+            records.append({
+                "id": row[0],
+                "sender": row[1],
+                "subject": row[2],
+                "body": row[3],
+                "intent": row[4],
+                "emotion": row[5],
+                "reply": row[6],
+                "confidence": row[7],
+                "status": row[8],
+                "escalation_reason": row[9],
+                "timestamp": row[10].isoformat() if row[10] else ""
+            })
+        
+        logger.debug("Fetched %d email records from database", len(records))
+        return records
+    
+    except DatabaseError as exc:
+        logger.error("Failed to fetch email records: %s", exc)
+        return []
+    finally:
+        conn.close()
+        logger.debug("PostgreSQL connection closed after get_email_records")
+

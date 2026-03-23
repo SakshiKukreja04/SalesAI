@@ -256,6 +256,25 @@ def fetch_unread_emails(max_results: int = 20) -> List[Dict[str, str]]:
         return []
 
 
+def mark_email_as_read(message_id: str) -> bool:
+    """Mark a Gmail message as read by removing the UNREAD label."""
+    service = get_gmail_service()
+    if service is None:
+        return False
+
+    try:
+        service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"removeLabelIds": ["UNREAD"]},
+        ).execute()
+        LOGGER.info("Marked email as read: %s", message_id)
+        return True
+    except Exception as exc:
+        LOGGER.exception("Failed to mark email as read %s: %s", message_id, exc)
+        return False
+
+
 def poll_emails(interval: int = 30) -> None:
     """Continuously poll unread emails at a fixed interval in seconds."""
     LOGGER.info("Starting email poller with interval=%s seconds", interval)

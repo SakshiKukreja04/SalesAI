@@ -28,12 +28,15 @@ class Settings:
     smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
     smtp_email: str = os.getenv("SMTP_EMAIL", "")
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
+    smtp_mock_mode: bool = os.getenv("SMTP_MOCK_MODE", "true").strip().lower() == "true"
+    reply_signature: str = os.getenv("REPLY_SIGNATURE", "Best regards,\nCustomer Support Team")
 
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 
     chroma_path: str = os.getenv("CHROMA_PATH", "./data/chroma")
     chroma_collection: str = os.getenv("CHROMA_COLLECTION", "salesai_knowledge")
+    chroma_reply_collection: str = os.getenv("CHROMA_REPLY_COLLECTION", "salesai_reply_memory")
 
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_key: str = os.getenv("SUPABASE_KEY", "")

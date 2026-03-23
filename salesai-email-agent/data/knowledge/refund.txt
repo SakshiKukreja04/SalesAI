@@ -1,6 +1,36 @@
-Refund Policy
+ShopiFyX Refund Policy
 
-1. Customers can request refunds within 30 days of delivery.
-2. Items must be unused and in original packaging unless damaged in transit.
-3. Refunds are processed within 5-10 business days after approval.
-4. If item is damaged or wrong, support can approve priority refund workflow.
+1. Refund Eligibility
+Customers can request a refund within 7 days of product delivery.
+
+2. Refund Conditions
+- Product must be unused
+- Product must be in original packaging
+- Invoice must be available
+- Product should not be damaged by customer
+
+3. Refund Process
+- Customer submits refund request
+- Support team verifies request
+- Product pickup scheduled
+- Refund initiated after inspection
+
+4. Refund Timeline
+- Pickup within 2-4 days
+- Refund processed within 5-7 business days
+- Amount credited to original payment method
+
+5. Non-Refundable Items
+- Personal care products
+- Opened electronics
+- Clearance sale items
+- Gift cards
+
+6. Late Refunds
+If refund is delayed, contact support with order ID.
+
+7. Partial Refund
+Partial refund may apply for damaged or incomplete returns.
+
+8. Refund Mode
+Refund will be credited to original payment source or wallet.

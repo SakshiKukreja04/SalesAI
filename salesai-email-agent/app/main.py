@@ -2,15 +2,16 @@
 
 import logging
 from threading import Thread
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from app.agents.orchestrator import handle_customer_email
+from app.agents.orchestrator import process_email as orchestrator_process_email
 from app.config import settings
+from app.db.supabase_client import get_email_records
 from app.email.fetch_emails import poll_gmail_inbox
-from app.email.send_email import send_email
 from app.rag.chroma_store import ensure_collection, seed_knowledge_from_folder
 from run_email_pipeline import run_email_pipeline
 
@@ -18,6 +19,15 @@ from run_email_pipeline import run_email_pipeline
 app = FastAPI(title=settings.app_name)
 LOGGER = logging.getLogger(__name__)
 _email_listener_thread: Thread | None = None
+
+# Enable CORS for frontend access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, restrict to specific origins
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def start_email_listener() -> None:
@@ -64,18 +74,31 @@ def poll() -> List[Dict[str, str]]:
 
 
 @app.post("/process-email")
-def process_email(payload: EmailRequest) -> Dict[str, str]:
-    """Run full multi-agent flow and optionally send generated reply."""
-    result = handle_customer_email(
-        customer_email=payload.customer_email,
-        subject=payload.subject,
-        body=payload.body,
-    )
-
-    send_email(
-        to_email=payload.customer_email,
-        subject=f"Re: {payload.subject}",
-        body=result["reply"],
+def process_email_endpoint(payload: EmailRequest) -> Dict[str, str]:
+    """Run SalesAI full email pipeline through orchestrator process_email."""
+    result = orchestrator_process_email(
+        {
+            "from": payload.customer_email,
+            "subject": payload.subject,
+            "body": payload.body,
+        }
     )
 
     return result
+
+
+@app.get("/api/emails")
+def get_emails(limit: int = 100) -> Dict[str, Any]:
+    """Fetch recent email records for admin dashboard.
+    
+    Args:
+        limit: Maximum number of records to return (default 100)
+    
+    Returns:
+        Dictionary with list of email records
+    """
+    records = get_email_records(limit=limit)
+    return {
+        "total": len(records),
+        "emails": records
+    }

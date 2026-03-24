@@ -15,7 +15,14 @@ import time
 from typing import Dict, List, Set
 
 from app.agents.orchestrator import handle_customer_email
-from app.db.supabase_client import create_table_if_not_exists, insert_email_data, get_email_records
+from app.db.supabase_client import (
+    check_email_already_replied,
+    create_table_if_not_exists,
+    get_replied_email_ids,
+    insert_email_data,
+    reserve_email_for_processing,
+    update_email_processing_status,
+)
 from app.email.fetch_emails import fetch_unread_emails, mark_email_as_read
 from app.email.send_email import extract_customer_name
 from app.nlp.emotion import detect_emotion_for_email
@@ -116,26 +123,62 @@ def add_to_processed(email_id: str) -> None:
 
 
 def load_processed_emails_from_database() -> None:
-    """Load already processed emails from Supabase to avoid re-processing.
-    
-    This is called on startup to initialize the processed_email_ids set
-    with emails that have already been handled.
-    """
+    """Load replied email IDs from DB into memory for fast duplicate skipping."""
     global processed_email_ids
-    
+
     try:
         logger.info("Loading processed emails from database...")
-        records = get_email_records(limit=1000)
-        
-        for record in records:
-            # Extract email_id from database (assuming it stores the Gmail ID)
-            # In our case, we might store it or derive it from context
-            # For now, we'll track by the id field
-            processed_email_ids.add(str(record.get("id", "")))
-        
+        processed_email_ids.update(get_replied_email_ids(limit=5000))
         logger.info("Loaded %d processed emails from database", len(processed_email_ids))
     except Exception as exc:
         logger.exception("Failed to load processed emails from database: %s", exc)
+
+
+def safe_send_email(email_id: str, customer_email: str, subject: str, body: str) -> dict:
+    """Process and send with strict idempotency guards.
+
+    Guard sequence:
+    1) Check durable replied state.
+    2) Atomically reserve processing state.
+    3) Generate+send reply via orchestrator.
+    4) Persist final status replied/failed/escalated.
+    """
+    if check_email_already_replied(email_id):
+        logger.info("Skipping email_id=%s (already replied)", email_id)
+        return {"status": "skipped", "reason": "already_replied"}
+
+    if not reserve_email_for_processing(email_id):
+        logger.info("Skipping email_id=%s (already reserved by another worker)", email_id)
+        return {"status": "skipped", "reason": "already_reserved"}
+
+    # Double-check right before send-generation path as strict failsafe.
+    if check_email_already_replied(email_id):
+        logger.info("Skipping email_id=%s (already replied before send)", email_id)
+        update_email_processing_status(email_id, "replied")
+        return {"status": "skipped", "reason": "already_replied_before_send"}
+
+    result = handle_customer_email(
+        customer_email=customer_email,
+        subject=subject,
+        body=body,
+    )
+
+    final_status = result.get("status", "failed")
+    if final_status == "replied":
+        update_email_processing_status(email_id, "replied")
+        add_to_processed(email_id)
+        logger.info("Reply sent successfully for email_id=%s", email_id)
+    elif final_status == "escalated":
+        update_email_processing_status(email_id, "escalated")
+        add_to_processed(email_id)
+        logger.info("Email escalated for email_id=%s", email_id)
+    else:
+        update_email_processing_status(
+            email_id,
+            "failed",
+            last_error=result.get("escalation_reason", "send_or_processing_failed"),
+        )
+    return result
 
 
 def clean_text(text: str) -> str:
@@ -243,6 +286,12 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
                     logger.debug("Email already processed, skipping: %s", message_id)
                     continue
 
+                # Durable idempotency check in case Gmail mark-as-read failed.
+                if check_email_already_replied(message_id):
+                    logger.info("Skipping email_id=%s (already replied)", message_id)
+                    add_to_processed(message_id)
+                    continue
+
                 # Skip if system email
                 if not is_valid_customer_email(from_header):
                     logger.info("Skipping system email from %s (id=%s)", from_header, message_id)
@@ -279,8 +328,9 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
 
                     logger.info("Processing email from %s: %s", customer_name, subject)
                     
-                    # Generate and send reply via orchestrator (includes safety checks)
-                    result = handle_customer_email(
+                    # Generate and send with durable idempotency protection.
+                    result = safe_send_email(
+                        email_id=message_id,
                         customer_email=customer_email,
                         subject=subject,
                         body=body,
@@ -313,7 +363,7 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
                         except Exception as exc:
                             logger.exception("Error marking email as read: %s", exc)
 
-                    # Add to processed set to prevent re-processing
+                    # Add to processed set for this runtime loop regardless of Gmail mark status.
                     add_to_processed(message_id)
                     logger.info("✓ Email processing complete: %s", message_id)
 
@@ -331,6 +381,7 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
                     
                     # Add to processed to avoid re-processing
                     add_to_processed(message_id)
+                    update_email_processing_status(message_id, "failed", last_error="pipeline_exception")
 
         if not poll_forever:
             return

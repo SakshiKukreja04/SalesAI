@@ -101,12 +101,29 @@ def create_table_if_not_exists() -> None:
     ON customer_emails (email_id)
     """
 
+    create_idempotency_table_query = """
+    CREATE TABLE IF NOT EXISTS email_processing_state (
+        email_id TEXT PRIMARY KEY,
+        status TEXT NOT NULL,
+        last_error TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+
+    create_idempotency_index_query = """
+    CREATE INDEX IF NOT EXISTS idx_email_processing_state_status
+    ON email_processing_state (status)
+    """
+
     try:
         with conn.cursor() as cursor:
             cursor.execute(create_table_query)
             cursor.execute(create_index_query)
+            cursor.execute(create_idempotency_table_query)
+            cursor.execute(create_idempotency_index_query)
         conn.commit()
-        logger.info("Ensured customer_emails table and indexes exist")
+        logger.info("Ensured customer_emails and email_processing_state tables exist")
     except DatabaseError:
         conn.rollback()
         logger.exception("Error while creating customer_emails table")
@@ -429,4 +446,146 @@ def get_email_records(limit: int = 100) -> list[dict]:
     finally:
         conn.close()
         logger.debug("PostgreSQL connection closed after get_email_records")
+
+
+def check_email_already_replied(email_id: str) -> bool:
+    """Return True when an email has already been replied and must be skipped."""
+    if not email_id:
+        return False
+
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable in check_email_already_replied(email_id=%s)", email_id)
+        return False
+
+    query = """
+    SELECT status
+    FROM email_processing_state
+    WHERE email_id = %s
+    LIMIT 1
+    """
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (email_id,))
+            row = cursor.fetchone()
+        return bool(row and row[0] == "replied")
+    except DatabaseError as exc:
+        logger.error("Failed check_email_already_replied for email_id=%s: %s", email_id, exc)
+        return False
+    finally:
+        conn.close()
+
+
+def reserve_email_for_processing(email_id: str) -> bool:
+    """Atomically reserve an email for processing to prevent duplicate workers.
+
+    Returns True only for the worker that successfully inserts the reservation.
+    """
+    if not email_id:
+        return False
+
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable in reserve_email_for_processing(email_id=%s)", email_id)
+        return False
+
+    insert_query = """
+    INSERT INTO email_processing_state (email_id, status)
+    VALUES (%s, 'processing')
+    ON CONFLICT (email_id) DO NOTHING
+    """
+
+    select_query = """
+    SELECT status
+    FROM email_processing_state
+    WHERE email_id = %s
+    LIMIT 1
+    """
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(insert_query, (email_id,))
+            inserted = cursor.rowcount > 0
+            if not inserted:
+                cursor.execute(select_query, (email_id,))
+                row = cursor.fetchone()
+                existing_status = row[0] if row else "unknown"
+                logger.info(
+                    "Skipping email_id=%s (already reserved with status=%s)",
+                    email_id,
+                    existing_status,
+                )
+        conn.commit()
+        return inserted
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed reserve_email_for_processing for email_id=%s: %s", email_id, exc)
+        return False
+    finally:
+        conn.close()
+
+
+def update_email_processing_status(email_id: str, status: str, last_error: str = "") -> bool:
+    """Update durable processing status for an email id."""
+    if not email_id:
+        return False
+
+    allowed = {"processing", "replied", "failed", "escalated"}
+    if status not in allowed:
+        logger.error("Invalid status=%s for email_id=%s", status, email_id)
+        return False
+
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable in update_email_processing_status(email_id=%s)", email_id)
+        return False
+
+    query = """
+    UPDATE email_processing_state
+    SET status = %s,
+        last_error = %s,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE email_id = %s
+    """
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (status, (last_error or "")[:1000], email_id))
+            updated = cursor.rowcount > 0
+        conn.commit()
+        return updated
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed update_email_processing_status for email_id=%s: %s", email_id, exc)
+        return False
+    finally:
+        conn.close()
+
+
+def get_replied_email_ids(limit: int = 5000) -> set[str]:
+    """Load replied email IDs for fast in-memory duplicate short-circuit."""
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable in get_replied_email_ids")
+        return set()
+
+    query = """
+    SELECT email_id
+    FROM email_processing_state
+    WHERE status = 'replied'
+    ORDER BY updated_at DESC
+    LIMIT %s
+    """
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (limit,))
+            rows = cursor.fetchall()
+        return {row[0] for row in rows if row and row[0]}
+    except DatabaseError as exc:
+        logger.error("Failed get_replied_email_ids: %s", exc)
+        return set()
+    finally:
+        conn.close()
 

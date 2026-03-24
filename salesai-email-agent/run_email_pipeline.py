@@ -17,10 +17,10 @@ from typing import Dict, List, Set
 from app.agents.orchestrator import handle_customer_email
 from app.db.supabase_client import create_table_if_not_exists, insert_email_data, get_email_records
 from app.email.fetch_emails import fetch_unread_emails, mark_email_as_read
-from app.email.send_email import send_email, extract_customer_name
+from app.email.send_email import extract_customer_name
 from app.nlp.emotion import detect_emotion_for_email
 from app.nlp.intent import classify_intent_for_email
-from app.rag.chroma_store import ensure_collection, seed_knowledge_from_folder
+from app.rag.chroma_store import ensure_collection, refresh_knowledge_embeddings
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -205,7 +205,13 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
     """
     try:
         ensure_collection()
-        seed_knowledge_from_folder("data/knowledge")
+        refresh_stats = refresh_knowledge_embeddings("data/knowledge")
+        logger.info(
+            "Knowledge refresh complete: files=%d chunks=%d deleted=%d",
+            refresh_stats.get("files", 0),
+            refresh_stats.get("chunks", 0),
+            refresh_stats.get("deleted", 0),
+        )
         create_table_if_not_exists()
         # Load already processed emails from database
         load_processed_emails_from_database()
@@ -273,24 +279,28 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
 
                     logger.info("Processing email from %s: %s", customer_name, subject)
                     
-                    # Generate and send reply
+                    # Generate and send reply via orchestrator (includes safety checks)
                     result = handle_customer_email(
                         customer_email=customer_email,
                         subject=subject,
                         body=body,
                     )
 
-                    sent = send_email(
-                        to_email=customer_email,
-                        subject=f"Re: {subject}".strip(),
-                        body=result.get("reply", ""),
-                        customer_name=customer_name,
-                    )
-
-                    if sent:
-                        logger.info("✓ Reply sent to %s (%s) for email id=%s", customer_email, customer_name, message_id)
+                    if result.get("status") in {"replied", "escalated"}:
+                        logger.info(
+                            "✓ Reply handled for %s (%s) status=%s email id=%s",
+                            customer_email,
+                            customer_name,
+                            result.get("status"),
+                            message_id,
+                        )
                     else:
-                        logger.error("✗ Reply failed to send to %s for email id=%s", customer_email, message_id)
+                        logger.error(
+                            "✗ Reply failed for %s status=%s email id=%s",
+                            customer_email,
+                            result.get("status"),
+                            message_id,
+                        )
 
                     # Mark email as read
                     if message_id:

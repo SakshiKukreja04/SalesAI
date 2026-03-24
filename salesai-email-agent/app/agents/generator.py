@@ -5,12 +5,59 @@ A Gemini generator is used when configured, with deterministic fallback output.
 """
 
 import logging
+import re
 from typing import List
 
 from app.config import settings
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _strategy_tone_guidance(strategy: str, emotion: str) -> str:
+    """Return concise tone instructions aligned with selected strategy."""
+    tone = "Use a professional, warm, and clear tone."
+    if strategy == "empathetic" or emotion in {"angry", "frustrated", "urgent"}:
+        tone = "Use an empathetic, calm, and reassuring tone."
+    elif strategy == "policy_focused":
+        tone = "Use a policy-accurate and reassuring tone with clear next steps."
+    elif strategy == "tracking_focused":
+        tone = "Use a proactive status-update tone and set clear expectations."
+    return tone
+
+
+def _email_style_instructions(strategy: str, intent: str, emotion: str) -> str:
+    """Build formatting guidance so replies read like human customer support emails."""
+    return (
+        f"Strategy: {strategy}\n"
+        f"Intent: {intent}\n"
+        f"Emotion: {emotion}\n"
+        f"Tone guidance: {_strategy_tone_guidance(strategy, emotion)}\n"
+        "Write in 2-3 short paragraphs using complete sentences.\n"
+        "Acknowledge the customer concern in the opening sentence.\n"
+        "Answer the question directly and clearly, without sounding robotic.\n"
+        "Avoid bullet points unless the customer explicitly asks for a list.\n"
+        "Do not include internal notes, model references, or policy speculation.\n"
+        "Do not include an email signature or sign-off name."
+    )
+
+
+def _extract_timeline_facts(context_docs: List[str]) -> List[str]:
+    """Extract timeline snippets from context to improve fallback readability."""
+    joined = "\n".join(context_docs)
+    if not joined.strip():
+        return []
+    patterns = [
+        r"pickup\s+within\s+\d+\s*(?:-|to)\s*\d+\s+days",
+        r"refund\s+processed\s+within\s+\d+\s*(?:-|to)\s*\d+\s+business\s+days",
+        r"credited\s+to\s+original\s+payment\s+method",
+    ]
+    facts: List[str] = []
+    for pattern in patterns:
+        match = re.search(pattern, joined, flags=re.IGNORECASE)
+        if match:
+            facts.append(match.group(0).strip())
+    return facts
 
 
 def _model_candidates() -> List[str]:
@@ -86,27 +133,30 @@ def _fallback_reply(strategy: str, intent: str, emotion: str, context_docs: List
     if context_docs:
         context_hint = context_docs[0]
 
-    base = (
-        "Thanks for your email. We understand your concern and are here to help. "
-        "Based on our support policy, we will guide you through the next steps."
-    )
+    base = "I'm not sure, let me connect you to support."
 
-    if intent == "Refund Request":
-        base = (
-            "Thanks for reaching out about your refund request. "
-            "We can help review eligibility and next steps under our refund policy."
-        )
-    elif intent == "Order Status":
-        base = (
-            "Thanks for checking on your order. "
-            "We will verify the latest shipping status and provide an update."
-        )
+    if intent == "Refund Request" and context_docs:
+        timeline_facts = _extract_timeline_facts(context_docs)
+        if timeline_facts:
+            pickup = next((f for f in timeline_facts if f.lower().startswith("pickup")), "")
+            refund = next((f for f in timeline_facts if f.lower().startswith("refund")), "")
+            credit = next((f for f in timeline_facts if "credited" in f.lower()), "")
+            details = ". ".join([fact for fact in [pickup.capitalize(), refund.capitalize(), credit.capitalize()] if fact])
+            base = (
+                "Thanks for reaching out about your refund request. "
+                + details
+                + "."
+            ).replace("..", ".")
+        else:
+            base = "Thanks for reaching out about your refund request."
+    elif intent == "Order Status" and context_docs:
+        base = "Thanks for checking on your order status. We will keep you updated with the latest tracking progress."
 
-    if emotion in {"angry", "frustrated", "urgent"}:
+    if emotion in {"angry", "frustrated", "urgent"} and context_docs:
         base = "We are sorry for the inconvenience. " + base
 
-    if strategy == "policy_focused" and context_hint:
-        return f"{base}\n\nRelevant policy context:\n{context_hint}"
+    if strategy == "policy_focused" and context_hint and "I'm not sure" not in base:
+        return base
     return base
 
 
@@ -117,26 +167,33 @@ def generate_reply(
     context_docs: List[str],
     similar_user_docs: List[str],
     customer_text: str,
+    strict_prompt: str | None = None,
 ) -> str:
     """Generate a policy-grounded reply from strategy, NLP outputs, and retrieved context."""
-    context_block = "\n\n".join(context_docs) if context_docs else "No internal policy context found."
-    user_history_block = "\n\n".join(similar_user_docs) if similar_user_docs else "No similar past user messages found."
+    style_block = _email_style_instructions(strategy=strategy, intent=intent, emotion=emotion)
+    if strict_prompt:
+        prompt = (
+            f"{strict_prompt}\n\n"
+            "Reply requirements:\n"
+            f"{style_block}\n"
+        )
+    else:
+        context_block = "\n\n".join(context_docs) if context_docs else "No internal policy context found."
+        user_history_block = "\n\n".join(similar_user_docs) if similar_user_docs else "No similar past user messages found."
 
-    prompt = (
-        "You are a customer support email assistant.\n"
-        "Use ONLY the provided policy context for policy claims.\n"
-        "Use similar past customer messages only for continuity and tone, not policy facts.\n"
-        "If context is insufficient, ask one short follow-up question instead of inventing details.\n"
-        "Keep tone professional, empathetic, and concise.\n"
-        "Do not mention internal tools, vector DB, or model names.\n\n"
-        f"Strategy: {strategy}\n"
-        f"Intent: {intent}\n"
-        f"Emotion: {emotion}\n"
-        f"Customer message: {customer_text}\n\n"
-        f"Relevant policy context:\n{context_block}\n\n"
-        f"Similar past customer messages:\n{user_history_block}\n\n"
-        "Output: A complete email body only."
-    )
+        prompt = (
+            "You are a customer support email assistant.\n"
+            "Use ONLY the provided policy context for policy claims.\n"
+            "Use similar past customer messages only for continuity and tone, not policy facts.\n"
+            "If context is insufficient, ask one short follow-up question instead of inventing details.\n"
+            "Keep tone professional, empathetic, and concise.\n"
+            "Do not mention internal tools, vector DB, or model names.\n\n"
+            f"{style_block}\n\n"
+            f"Customer message: {customer_text}\n\n"
+            f"Relevant policy context:\n{context_block}\n\n"
+            f"Similar past customer messages:\n{user_history_block}\n\n"
+            "Output: A complete email body only."
+        )
 
     generated = _gemini_generate(prompt)
     if generated:

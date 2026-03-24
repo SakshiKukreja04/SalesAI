@@ -8,17 +8,74 @@ from uuid import uuid4
 from app.agents.escalation import escalate_to_human, should_escalate
 from app.agents.generator import generate_reply
 from app.agents.strategy import select_strategy
+from app.config import settings
 from app.db.supabase_client import log_interaction, save_email_record
+from app.email.safety_middleware import enforce_email_safety
 from app.email.send_email import send_email, send_email_reply, extract_customer_name
 from app.memory.reply_memory import store_reply_memory
 from app.nlp.emotion import detect_emotion
 from app.nlp.intent import classify_intent
-from app.nlp.preprocess import preprocess_text
+from app.nlp.preprocess import clean_query_text, preprocess_text
 from app.rag.chroma_store import add_user_documents
-from app.rag.retrieval import retrieve_similar_user_messages, retrieve_top_k
+from app.rag.prompt_builder import build_strict_context_prompt
+from app.rag.response_validator import SAFE_FALLBACK_RESPONSE, validate_response
+from app.rag.retrieval import retrieve_relevant_chunks, retrieve_similar_user_messages
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _generate_validated_reply(
+    strategy: str,
+    intent: str,
+    emotion: str,
+    normalized_text: str,
+    context_docs: list[str],
+    similar_user_docs: list[str],
+) -> str:
+    """Generate reply under strict prompting with post-check and one retry."""
+    strict_prompt = build_strict_context_prompt(
+        user_query=normalized_text,
+        retrieved_chunks=context_docs,
+    )
+    reply = generate_reply(
+        strategy=strategy,
+        intent=intent,
+        emotion=emotion,
+        context_docs=context_docs,
+        similar_user_docs=similar_user_docs,
+        customer_text=normalized_text,
+        strict_prompt=strict_prompt,
+    )
+
+    validation = validate_response(answer=reply, context_chunks=context_docs)
+    if validation.is_valid:
+        return reply
+
+    LOGGER.warning("Post-generation fact check failed: reason=%s", validation.reason)
+
+    retry_prompt = (
+        strict_prompt
+        + "\n\n"
+        + "IMPORTANT: The previous answer failed fact validation. "
+        + "Use only exact facts in context and avoid unsupported numbers or timelines."
+    )
+    retry_reply = generate_reply(
+        strategy=strategy,
+        intent=intent,
+        emotion=emotion,
+        context_docs=context_docs,
+        similar_user_docs=similar_user_docs,
+        customer_text=normalized_text,
+        strict_prompt=retry_prompt,
+    )
+
+    retry_validation = validate_response(answer=retry_reply, context_chunks=context_docs)
+    if retry_validation.is_valid:
+        return retry_reply
+
+    LOGGER.warning("Retry fact check failed: reason=%s", retry_validation.reason)
+    return SAFE_FALLBACK_RESPONSE
 
 
 def _calculate_confidence(
@@ -132,29 +189,55 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
         )
         
         # Step 4-5: Retrieve context from RAG
-        query = f"subject: {subject}\nmessage: {normalized_text}"
-        context_docs = retrieve_top_k(query=query, k=2)
+        retrieval_query = clean_query_text(body)
+        query = f"subject: {subject}\nmessage: {retrieval_query or normalized_text}"
+        retrieval_result = retrieve_relevant_chunks(
+            query=query,
+            top_k=settings.rag_top_k,
+            min_similarity=settings.rag_similarity_threshold,
+            relaxed_fallback_k=settings.rag_relaxed_fallback_k,
+            use_keyword_boost=settings.rag_keyword_boost,
+        )
+        retrieved_chunks = retrieval_result.chunks
+        context_docs = [chunk.to_context_block() for chunk in retrieved_chunks]
         similar_user_docs = retrieve_similar_user_messages(query=query, k=2)
         
         LOGGER.debug(
             "[%s] RAG Retrieval: %d knowledge chunks, %d similar messages",
             request_id,
-            len(context_docs),
+            len(retrieved_chunks),
             len(similar_user_docs),
         )
+
+        if not context_docs:
+            LOGGER.warning("[%s] No relevant chunks above threshold, using safe fallback", request_id)
+            reply = SAFE_FALLBACK_RESPONSE
+        else:
+            if retrieval_result.fallback_relaxed:
+                LOGGER.warning("[%s] Using relaxed retrieval fallback chunks for generation", request_id)
+            reply = _generate_validated_reply(
+                strategy=select_strategy(intent=intent, emotion=emotion),
+                intent=intent,
+                emotion=emotion,
+                normalized_text=normalized_text,
+                context_docs=context_docs,
+                similar_user_docs=similar_user_docs,
+            )
         
         # Step 6: Strategy selection
         strategy = select_strategy(intent=intent, emotion=emotion)
-        
-        # Step 7: Generate reply
-        reply = generate_reply(
-            strategy=strategy,
-            intent=intent,
-            emotion=emotion,
-            context_docs=context_docs,
-            similar_user_docs=similar_user_docs,
-            customer_text=normalized_text,
-        )
+
+        LOGGER.info("[%s] RAG Debug | query=%r", request_id, query)
+        for idx, chunk in enumerate(retrieved_chunks, start=1):
+            LOGGER.info(
+                "[%s] Chunk #%d score=%.3f source=%s topic=%s version=%s",
+                request_id,
+                idx,
+                chunk.score,
+                chunk.source_file,
+                chunk.topic,
+                chunk.version,
+            )
         
         # Step 8: Calculate confidence
         confidence_score = _calculate_confidence(
@@ -234,10 +317,17 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
             # Send reply to customer
             LOGGER.info("[%s] Sending reply to customer", request_id)
             
+            safe_reply, blocked, safety_reason = enforce_email_safety(
+                answer=reply,
+                retrieved_context_chunks=context_docs,
+            )
+            if blocked:
+                LOGGER.warning("[%s] SMTP safety middleware replaced reply: %s", request_id, safety_reason)
+
             send_success = send_email(
                 to_email=customer_email,
                 subject=subject,
-                body=reply,
+                body=safe_reply,
                 use_reply_prefix=True,
             )
             
@@ -249,7 +339,7 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
                     body=body,
                     intent=intent,
                     emotion=emotion,
-                    reply=reply,
+                    reply=safe_reply,
                     status="failed",
                     confidence=confidence_score,
                 )
@@ -281,7 +371,7 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
             # Store reply in memory for future reference
             store_reply_memory(
                 customer_email=customer_email,
-                generated_reply=reply,
+                generated_reply=safe_reply,
                 intent=intent,
                 emotion=emotion,
             )
@@ -293,7 +383,7 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
                 body=body,
                 intent=intent,
                 emotion=emotion,
-                reply=reply,
+                reply=safe_reply,
                 status="replied",
                 confidence=confidence_score,
             )
@@ -307,9 +397,11 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
                     "emotion": emotion,
                     "emotion_confidence": emotion_confidence,
                     "strategy": strategy,
-                    "reply": reply,
+                    "reply": safe_reply,
                 }
             )
+
+            LOGGER.info("[%s] Final answer (post-safety): %s", request_id, safe_reply)
             
             LOGGER.info(
                 "[%s] Email processed successfully (status=replied)",
@@ -318,7 +410,7 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
             
             return {
                 "status": "replied",
-                "reply": reply,
+                "reply": safe_reply,
                 "confidence": f"{confidence_score:.2f}",
                 "intent": intent,
                 "emotion": emotion,
@@ -374,25 +466,46 @@ def process_email(email: dict) -> dict:
         emotion_data = detect_emotion(normalized_text)
         emotion = emotion_data.get("emotion", "unknown")
 
-        query = f"subject: {subject}\nmessage: {normalized_text}"
-        context_docs = retrieve_top_k(query=query, k=2)
+        retrieval_query = clean_query_text(body)
+        query = f"subject: {subject}\nmessage: {retrieval_query or normalized_text}"
+        retrieval_result = retrieve_relevant_chunks(
+            query=query,
+            top_k=settings.rag_top_k,
+            min_similarity=settings.rag_similarity_threshold,
+            relaxed_fallback_k=settings.rag_relaxed_fallback_k,
+            use_keyword_boost=settings.rag_keyword_boost,
+        )
+        retrieved_chunks = retrieval_result.chunks
+        context_docs = [chunk.to_context_block() for chunk in retrieved_chunks]
         similar_user_docs = retrieve_similar_user_messages(query=query, k=2)
 
         strategy = select_strategy(intent=intent, emotion=emotion)
-        generated_reply = generate_reply(
-            strategy=strategy,
-            intent=intent,
-            emotion=emotion,
-            context_docs=context_docs,
-            similar_user_docs=similar_user_docs,
-            customer_text=normalized_text,
+        if not context_docs:
+            generated_reply = SAFE_FALLBACK_RESPONSE
+        else:
+            if retrieval_result.fallback_relaxed:
+                LOGGER.warning("process_email using relaxed retrieval fallback chunks for generation")
+            generated_reply = _generate_validated_reply(
+                strategy=strategy,
+                intent=intent,
+                emotion=emotion,
+                normalized_text=normalized_text,
+                context_docs=context_docs,
+                similar_user_docs=similar_user_docs,
+            )
+
+        safe_reply, blocked, safety_reason = enforce_email_safety(
+            answer=generated_reply,
+            retrieved_context_chunks=context_docs,
         )
+        if blocked:
+            LOGGER.warning("process_email SMTP safety middleware replaced reply: %s", safety_reason)
 
         # Send via SMTP using dedicated helper with customer name
         email_sent = send_email_reply(
             to=sender,
             subject=subject,
-            body=generated_reply,
+            body=safe_reply,
             customer_name=customer_name,
         )
 
@@ -402,7 +515,7 @@ def process_email(email: dict) -> dict:
             LOGGER.info("Email sent successfully to %s (%s)", sender, customer_name)
             store_reply_memory(
                 customer_email=sender,
-                generated_reply=generated_reply,
+                generated_reply=safe_reply,
                 intent=intent,
                 emotion=emotion,
             )
@@ -416,12 +529,12 @@ def process_email(email: dict) -> dict:
             body=body,
             intent=intent,
             emotion=emotion,
-            reply=generated_reply,
+            reply=safe_reply,
             status=status,
             confidence=_calculate_confidence(
                 context_docs=context_docs,
                 similar_user_docs=similar_user_docs,
-                reply=generated_reply,
+                reply=safe_reply,
             ),
         )
         LOGGER.info("Email record saved with status=%s", status)
@@ -435,11 +548,23 @@ def process_email(email: dict) -> dict:
                 "emotion": emotion,
                 "emotion_confidence": emotion_data.get("confidence", 0.0),
                 "strategy": strategy,
-                "reply": generated_reply,
+                "reply": safe_reply,
             }
         )
 
-        return {"status": status, "reply": generated_reply}
+        LOGGER.info("RAG Debug | query=%r", query)
+        for idx, chunk in enumerate(retrieved_chunks, start=1):
+            LOGGER.info(
+                "Chunk #%d score=%.3f source=%s topic=%s version=%s",
+                idx,
+                chunk.score,
+                chunk.source_file,
+                chunk.topic,
+                chunk.version,
+            )
+        LOGGER.info("Final answer (post-safety): %s", safe_reply)
+
+        return {"status": status, "reply": safe_reply}
 
     except Exception as exc:
         LOGGER.exception("process_email failed for sender=%s: %s", sender, exc)

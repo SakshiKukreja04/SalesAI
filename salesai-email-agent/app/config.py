@@ -28,7 +28,7 @@ class Settings:
     smtp_port: int = int(os.getenv("SMTP_PORT", "587"))
     smtp_email: str = os.getenv("SMTP_EMAIL", "")
     smtp_password: str = os.getenv("SMTP_PASSWORD", "")
-    smtp_mock_mode: bool = os.getenv("SMTP_MOCK_MODE", "true").strip().lower() == "true"
+    smtp_mock_mode: bool = os.getenv("SMTP_MOCK_MODE", "false").strip().lower() == "true"
     reply_signature: str = os.getenv("REPLY_SIGNATURE", "Best regards,\nCustomer Support Team")
 
     gemini_api_key: str = os.getenv("GEMINI_API_KEY", "")
@@ -37,6 +37,12 @@ class Settings:
     chroma_path: str = os.getenv("CHROMA_PATH", "./data/chroma")
     chroma_collection: str = os.getenv("CHROMA_COLLECTION", "salesai_knowledge")
     chroma_reply_collection: str = os.getenv("CHROMA_REPLY_COLLECTION", "salesai_reply_memory")
+    rag_top_k: int = int(os.getenv("RAG_TOP_K", "5"))
+    rag_similarity_threshold: float = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.60"))
+    rag_relaxed_fallback_k: int = int(os.getenv("RAG_RELAXED_FALLBACK_K", "2"))
+    rag_keyword_boost: bool = os.getenv("RAG_KEYWORD_BOOST", "true").strip().lower() == "true"
+    rag_debug_logging: bool = os.getenv("RAG_DEBUG_LOGGING", "true").strip().lower() == "true"
+    embedding_model_name: str = os.getenv("EMBEDDING_MODEL_NAME", "chroma_default")
 
     supabase_url: str = os.getenv("SUPABASE_URL", "")
     supabase_key: str = os.getenv("SUPABASE_KEY", "")

@@ -12,7 +12,7 @@ from app.agents.orchestrator import process_email as orchestrator_process_email
 from app.config import settings
 from app.db.supabase_client import get_email_records
 from app.email.fetch_emails import poll_gmail_inbox
-from app.rag.chroma_store import ensure_collection, seed_knowledge_from_folder
+from app.rag.chroma_store import ensure_collection, refresh_knowledge_embeddings
 from run_email_pipeline import run_email_pipeline
 
 
@@ -49,7 +49,13 @@ def startup_event() -> None:
     global _email_listener_thread
 
     ensure_collection()
-    seed_knowledge_from_folder("data/knowledge")
+    refresh_stats = refresh_knowledge_embeddings("data/knowledge")
+    LOGGER.info(
+        "Knowledge refresh complete: files=%d chunks=%d deleted=%d",
+        refresh_stats.get("files", 0),
+        refresh_stats.get("chunks", 0),
+        refresh_stats.get("deleted", 0),
+    )
 
     if _email_listener_thread and _email_listener_thread.is_alive():
         return

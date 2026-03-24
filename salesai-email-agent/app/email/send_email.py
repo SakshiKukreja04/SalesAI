@@ -8,6 +8,7 @@ import base64
 import logging
 import os
 import smtplib
+from email.utils import parseaddr
 from email.mime.text import MIMEText
 from typing import Optional
 
@@ -218,6 +219,12 @@ def send_email(to_email: str, subject: str, body: str, use_reply_prefix: bool = 
     Returns:
         True if email was sent successfully, False otherwise.
     """
+    _, parsed_to = parseaddr(to_email)
+    recipient = parsed_to or (to_email or "").strip()
+    if not recipient:
+        LOGGER.error("send_email: Invalid recipient address: %r", to_email)
+        return False
+
     final_body = _with_signature(body)
     final_subject = f"Re: {subject}" if use_reply_prefix and not subject.startswith("Re:") else subject
     
@@ -227,20 +234,20 @@ def send_email(to_email: str, subject: str, body: str, use_reply_prefix: bool = 
     
     # Mock mode for development
     if settings.smtp_mock_mode:
-        LOGGER.info("[MOCK EMAIL] To: %s | Subject: %s | Customer: %s", to_email, final_subject, customer_name)
-        print(f"[MOCK EMAIL] To: {to_email} | Subject: {final_subject} | Customer: {customer_name}\n{final_body}")
+        LOGGER.info("[MOCK EMAIL] To: %s | Subject: %s | Customer: %s", recipient, final_subject, customer_name)
+        print(f"[MOCK EMAIL] To: {recipient} | Subject: {final_subject} | Customer: {customer_name}\n{final_body}")
         return True
     
     # Try Gmail API first
-    if _send_via_gmail_api(to_email, final_subject, final_body):
+    if _send_via_gmail_api(recipient, final_subject, final_body):
         return True
     
     # Fall back to SMTP
     LOGGER.info("Gmail API not available; attempting SMTP fallback")
-    if _send_via_smtp(to_email, final_subject, final_body):
+    if _send_via_smtp(recipient, final_subject, final_body):
         return True
     
-    LOGGER.error("Failed to send email to %s via both Gmail API and SMTP", to_email)
+    LOGGER.error("Failed to send email to %s via both Gmail API and SMTP", recipient)
     return False
 
 
@@ -274,8 +281,18 @@ def send_email_reply(to: str, subject: str, body: str, customer_name: str = "") 
     if not to or not subject or not body:
         LOGGER.error("send_email_reply: Missing required arguments (to, subject, body)")
         return False
+
+    _, parsed_to = parseaddr(to)
+    recipient = parsed_to or (to or "").strip()
+    if not recipient:
+        LOGGER.error("send_email_reply: Invalid recipient address: %r", to)
+        return False
+
+    if settings.smtp_mock_mode:
+        LOGGER.info("[MOCK EMAIL] send_email_reply To=%s Subject=%s", recipient, subject)
+        return True
     
-    if not SMTP_EMAIL or not SMTP_PASSWORD:
+    if not settings.smtp_email or not settings.smtp_password:
         LOGGER.error(
             "send_email_reply: SMTP credentials not configured. "
             "Set SMTP_EMAIL and SMTP_PASSWORD in .env"
@@ -285,7 +302,7 @@ def send_email_reply(to: str, subject: str, body: str, customer_name: str = "") 
     try:
         # Extract customer name from email if not provided
         if not customer_name:
-            customer_name = extract_customer_name(to)
+            customer_name = extract_customer_name(recipient)
         
         # Format subject with "Re: " prefix
         reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
@@ -301,21 +318,21 @@ def send_email_reply(to: str, subject: str, body: str, customer_name: str = "") 
         # Create MIME message
         msg = MIMEText(formatted_body)
         msg["Subject"] = reply_subject
-        msg["From"] = SMTP_EMAIL
-        msg["To"] = to
+        msg["From"] = settings.smtp_email
+        msg["To"] = recipient
         
         # Send via SMTP
-        LOGGER.debug("Connecting to SMTP server %s:%d", SMTP_SERVER, SMTP_PORT)
+        LOGGER.debug("Connecting to SMTP server %s:%d", settings.smtp_server, settings.smtp_port)
         
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        with smtplib.SMTP(settings.smtp_server, settings.smtp_port) as server:
             server.starttls()
             LOGGER.debug("TLS connection established")
             
-            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.login(settings.smtp_email, settings.smtp_password)
             LOGGER.debug("SMTP authentication successful")
             
-            server.sendmail(SMTP_EMAIL, [to], msg.as_string())
-            LOGGER.info("Email sent successfully to %s", to)
+            server.sendmail(settings.smtp_email, [recipient], msg.as_string())
+            LOGGER.info("Email sent successfully to %s", recipient)
         
         return True
         
@@ -331,6 +348,6 @@ def send_email_reply(to: str, subject: str, body: str, customer_name: str = "") 
         return False
         
     except Exception as exc:
-        LOGGER.error("Failed to send email reply to %s: %s", to, exc)
+        LOGGER.error("Failed to send email reply to %s: %s", recipient, exc)
         return False
 

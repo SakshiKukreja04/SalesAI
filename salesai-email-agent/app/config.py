@@ -49,6 +49,8 @@ class Settings:
     supabase_table: str = os.getenv("SUPABASE_TABLE", "email_logs")
 
     supabase_db_url: str = os.getenv("SUPABASE_DB_URL", "")
+    firebase_project_id: str = os.getenv("FIREBASE_PROJECT_ID", "")
+    allow_insecure_dev_auth: bool = os.getenv("ALLOW_INSECURE_DEV_AUTH", "true").strip().lower() == "true"
 
 
 def get_env_var(name: str, default: str = "") -> str:

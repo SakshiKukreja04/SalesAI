@@ -589,3 +589,289 @@ def get_replied_email_ids(limit: int = 5000) -> set[str]:
     finally:
         conn.close()
 
+
+def _create_app_users_table_if_not_exists(conn: Any) -> None:
+    """Ensure app_users table exists for role-based access and invite workflow."""
+    create_table_query = """
+    CREATE TABLE IF NOT EXISTS app_users (
+        id SERIAL PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        name TEXT,
+        role TEXT NOT NULL,
+        business_id TEXT NOT NULL,
+        assigned_intents TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        status TEXT NOT NULL,
+        firebase_uid TEXT,
+        invited_by TEXT,
+        invited_at TIMESTAMP,
+        activated_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """
+
+    create_email_index_query = """
+    CREATE INDEX IF NOT EXISTS idx_app_users_email
+    ON app_users (email)
+    """
+
+    create_business_index_query = """
+    CREATE INDEX IF NOT EXISTS idx_app_users_business_id
+    ON app_users (business_id)
+    """
+
+    create_status_index_query = """
+    CREATE INDEX IF NOT EXISTS idx_app_users_status
+    ON app_users (status)
+    """
+
+    with conn.cursor() as cursor:
+        cursor.execute(create_table_query)
+        cursor.execute(create_email_index_query)
+        cursor.execute(create_business_index_query)
+        cursor.execute(create_status_index_query)
+
+
+def create_or_update_admin_user(
+    *,
+    email: str,
+    name: str,
+    business_id: str,
+    firebase_uid: str,
+) -> Dict[str, Any]:
+    """Create or update an admin user record during bootstrap signup."""
+    conn = get_connection()
+    if conn is None:
+        raise RuntimeError("Database connection could not be established")
+
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        raise ValueError("email is required")
+
+    query = """
+    INSERT INTO app_users (
+        email,
+        name,
+        role,
+        business_id,
+        assigned_intents,
+        status,
+        firebase_uid,
+        activated_at,
+        updated_at
+    ) VALUES (%s, %s, 'admin', %s, %s, 'active', %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT (email)
+    DO UPDATE SET
+        name = EXCLUDED.name,
+        role = 'admin',
+        business_id = EXCLUDED.business_id,
+        assigned_intents = EXCLUDED.assigned_intents,
+        status = 'active',
+        firebase_uid = EXCLUDED.firebase_uid,
+        activated_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    RETURNING email, name, role, business_id, assigned_intents, status, firebase_uid
+    """
+
+    try:
+        _create_app_users_table_if_not_exists(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                query,
+                (
+                    normalized_email,
+                    (name or "").strip() or normalized_email,
+                    (business_id or "").strip() or normalized_email,
+                    ["ALL"],
+                    (firebase_uid or "").strip() or None,
+                ),
+            )
+            row = cursor.fetchone()
+        conn.commit()
+        return {
+            "email": row[0],
+            "name": row[1],
+            "role": row[2],
+            "business_id": row[3],
+            "assigned_intents": row[4] or [],
+            "status": row[5],
+            "firebase_uid": row[6],
+        }
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed create_or_update_admin_user(email=%s): %s", normalized_email, exc)
+        raise
+    finally:
+        conn.close()
+
+
+def invite_user(
+    *,
+    name: str,
+    email: str,
+    role: str,
+    business_id: str,
+    assigned_intents: list[str],
+    invited_by: str,
+) -> Dict[str, Any]:
+    """Create or refresh an invited user record."""
+    conn = get_connection()
+    if conn is None:
+        raise RuntimeError("Database connection could not be established")
+
+    normalized_email = (email or "").strip().lower()
+    normalized_role = "manager" if role != "admin" else "admin"
+    normalized_business_id = (business_id or "").strip()
+    if not normalized_email:
+        raise ValueError("email is required")
+    if not normalized_business_id:
+        raise ValueError("business_id is required")
+
+    intents = [item.strip() for item in (assigned_intents or []) if item and item.strip()]
+    if normalized_role == "admin":
+        intents = ["ALL"]
+
+    query = """
+    INSERT INTO app_users (
+        email,
+        name,
+        role,
+        business_id,
+        assigned_intents,
+        status,
+        invited_by,
+        invited_at,
+        updated_at
+    ) VALUES (%s, %s, %s, %s, %s, 'invited', %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT (email)
+    DO UPDATE SET
+        name = EXCLUDED.name,
+        role = EXCLUDED.role,
+        business_id = EXCLUDED.business_id,
+        assigned_intents = EXCLUDED.assigned_intents,
+        status = 'invited',
+        invited_by = EXCLUDED.invited_by,
+        invited_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    RETURNING email, name, role, business_id, assigned_intents, status
+    """
+
+    try:
+        _create_app_users_table_if_not_exists(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(
+                query,
+                (
+                    normalized_email,
+                    (name or "").strip() or normalized_email,
+                    normalized_role,
+                    normalized_business_id,
+                    intents,
+                    (invited_by or "").strip() or None,
+                ),
+            )
+            row = cursor.fetchone()
+        conn.commit()
+        return {
+            "email": row[0],
+            "name": row[1],
+            "role": row[2],
+            "business_id": row[3],
+            "assigned_intents": row[4] or [],
+            "status": row[5],
+        }
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed invite_user(email=%s): %s", normalized_email, exc)
+        raise
+    finally:
+        conn.close()
+
+
+def get_app_user_by_email(email: str) -> Optional[Dict[str, Any]]:
+    """Lookup app user by email."""
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return None
+
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable in get_app_user_by_email(email=%s)", normalized_email)
+        return None
+
+    query = """
+    SELECT email, name, role, business_id, assigned_intents, status, firebase_uid
+    FROM app_users
+    WHERE email = %s
+    LIMIT 1
+    """
+
+    try:
+        _create_app_users_table_if_not_exists(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(query, (normalized_email,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "email": row[0],
+            "name": row[1],
+            "role": row[2],
+            "business_id": row[3],
+            "assigned_intents": row[4] or [],
+            "status": row[5],
+            "firebase_uid": row[6],
+        }
+    except DatabaseError as exc:
+        logger.error("Failed get_app_user_by_email(email=%s): %s", normalized_email, exc)
+        return None
+    finally:
+        conn.close()
+
+
+def activate_app_user(*, email: str, firebase_uid: str) -> Optional[Dict[str, Any]]:
+    """Activate a previously invited user after Firebase signup completes."""
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        return None
+
+    conn = get_connection()
+    if conn is None:
+        logger.warning("DB unavailable in activate_app_user(email=%s)", normalized_email)
+        return None
+
+    query = """
+    UPDATE app_users
+    SET status = 'active',
+        firebase_uid = %s,
+        activated_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE email = %s
+      AND status IN ('invited', 'active')
+    RETURNING email, name, role, business_id, assigned_intents, status, firebase_uid
+    """
+
+    try:
+        _create_app_users_table_if_not_exists(conn)
+        with conn.cursor() as cursor:
+            cursor.execute(query, ((firebase_uid or "").strip() or None, normalized_email))
+            row = cursor.fetchone()
+        conn.commit()
+        if not row:
+            return None
+        return {
+            "email": row[0],
+            "name": row[1],
+            "role": row[2],
+            "business_id": row[3],
+            "assigned_intents": row[4] or [],
+            "status": row[5],
+            "firebase_uid": row[6],
+        }
+    except DatabaseError as exc:
+        conn.rollback()
+        logger.error("Failed activate_app_user(email=%s): %s", normalized_email, exc)
+        return None
+    finally:
+        conn.close()
+

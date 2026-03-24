@@ -7,6 +7,7 @@ fallback to SMTP if Gmail API is unavailable.
 import base64
 import logging
 import os
+import re
 import smtplib
 from email.utils import parseaddr
 from email.mime.text import MIMEText
@@ -23,6 +24,40 @@ from app.config import settings
 
 load_dotenv()
 LOGGER = logging.getLogger(__name__)
+
+# Common surname endings used as a fallback for compact email usernames.
+COMMON_SURNAME_SUFFIXES = {
+    "sinha",
+    "singh",
+    "sharma",
+    "gupta",
+    "kumar",
+    "verma",
+    "mehta",
+    "khan",
+    "patel",
+    "jain",
+    "agarwal",
+    "agrawal",
+    "tiwari",
+    "trivedi",
+    "chopra",
+    "kapoor",
+    "malhotra",
+    "bhatia",
+    "chauhan",
+    "yadav",
+    "pandey",
+    "mishra",
+    "saxena",
+    "arora",
+    "joshi",
+    "nair",
+    "menon",
+    "reddy",
+    "iyer",
+    "iyengar",
+}
 
 
 def extract_customer_name(from_header: str) -> str:
@@ -56,16 +91,33 @@ def extract_customer_name(from_header: str) -> str:
         return "Valued Customer"
     
     email_local_part = email_match.split("@")[0]
-    
-    # Handle common formats: john.doe, john_doe, johndoe
-    if "." in email_local_part:
-        name_parts = email_local_part.split(".")
-        name = " ".join(part.capitalize() for part in name_parts)
-    elif "_" in email_local_part:
-        name_parts = email_local_part.split("_")
-        name = " ".join(part.capitalize() for part in name_parts)
-    else:
-        name = email_local_part.capitalize()
+
+    # Strip digits and normalize separators into spaces.
+    cleaned_local = re.sub(r"\d+", "", email_local_part)
+    cleaned_local = re.sub(r"[._\-+]+", " ", cleaned_local).strip()
+    cleaned_local = re.sub(r"\s+", " ", cleaned_local)
+
+    # If no separators exist and we detect a repeated boundary letter (e.g. "palakkukreja"),
+    # split into two words to improve readability.
+    if " " not in cleaned_local:
+        duplicate_boundary = re.search(r"([a-zA-Z])\1[a-zA-Z]{4,}$", cleaned_local)
+        if duplicate_boundary and duplicate_boundary.start() >= 2:
+            split_idx = duplicate_boundary.start() + 1
+            cleaned_local = f"{cleaned_local[:split_idx]} {cleaned_local[split_idx:]}"
+
+    # Fallback for compact names like "nihalsinha" -> "nihal sinha".
+    # Apply only when we still have a single token and both sides are meaningful.
+    if " " not in cleaned_local:
+        local_lower = cleaned_local.lower()
+        for suffix in COMMON_SURNAME_SUFFIXES:
+            if local_lower.endswith(suffix) and len(local_lower) > len(suffix) + 1:
+                prefix = cleaned_local[: len(cleaned_local) - len(suffix)]
+                if len(prefix) >= 3:
+                    cleaned_local = f"{prefix} {cleaned_local[-len(suffix):]}"
+                    break
+
+    name_parts = [part for part in cleaned_local.split(" ") if part]
+    name = " ".join(part.capitalize() for part in name_parts)
     
     return name if name else "Valued Customer"
 
@@ -102,6 +154,20 @@ def _with_signature(body: str) -> str:
         return signature
 
     return f"{content}\n\n{signature}"
+
+
+def _with_customer_greeting(body: str, customer_name: str) -> str:
+    """Prefix reply body with a personalized greeting when appropriate."""
+    content = (body or "").strip()
+    if not content:
+        return content
+
+    first_line = content.splitlines()[0].strip().lower()
+    if first_line.startswith("hi ") or first_line.startswith("hello "):
+        return content
+
+    safe_name = (customer_name or "").strip() or "Valued Customer"
+    return f"Hi {safe_name},\n\n{content}"
 
 
 def _get_gmail_service() -> Optional[object]:
@@ -225,12 +291,12 @@ def send_email(to_email: str, subject: str, body: str, use_reply_prefix: bool = 
         LOGGER.error("send_email: Invalid recipient address: %r", to_email)
         return False
 
-    final_body = _with_signature(body)
-    final_subject = f"Re: {subject}" if use_reply_prefix and not subject.startswith("Re:") else subject
-    
-    # Extract customer name if not provided
     if not customer_name:
-        customer_name = extract_customer_name(to_email)
+        customer_name = extract_customer_name(recipient)
+
+    personalized_body = _with_customer_greeting(body, customer_name)
+    final_body = _with_signature(personalized_body)
+    final_subject = f"Re: {subject}" if use_reply_prefix and not subject.startswith("Re:") else subject
     
     # Mock mode for development
     if settings.smtp_mock_mode:

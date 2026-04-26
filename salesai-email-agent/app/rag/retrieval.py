@@ -5,10 +5,15 @@ import logging
 from typing import List
 
 from app.config import settings
-from app.rag.chroma_store import ensure_collection, ensure_user_collection
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+import chromadb
+from app.rag.chroma_store import ensure_user_collection
 
 
 LOGGER = logging.getLogger(__name__)
+embedding_fn = SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
+LOGGER.info("Using HuggingFace retrieval model: sentence-transformers/all-MiniLM-L6-v2")
+_client = chromadb.PersistentClient(path=settings.chroma_path)
 
 _CRITICAL_KEYWORDS = {"refund", "return", "shipping", "delivery", "warranty"}
 
@@ -65,10 +70,10 @@ def _keyword_overlap_bonus(query: str, document: str) -> float:
 def _query_embedding_debug_vector(query_text: str) -> tuple[int, list[float]]:
     """Return embedding length and a short preview for debugging."""
     try:
-        collection = ensure_collection()
-        embedding_fn = getattr(collection, "_embedding_function", None)
-        if embedding_fn is None:
-            return 0, []
+        collection = _client.get_or_create_collection(
+            name="salesai_knowledge_v2",
+            embedding_function=embedding_fn
+        )
         vector = embedding_fn([query_text])[0]
         preview = [round(float(x), 6) for x in vector[:8]]
         return len(vector), preview
@@ -99,7 +104,10 @@ def retrieve_relevant_chunks(
     use_keyword_boost: bool = True,
 ) -> RetrievalResult:
     """Retrieve and filter knowledge chunks with score thresholding."""
-    collection = ensure_collection()
+    collection = _client.get_or_create_collection(
+        name="salesai_knowledge_v2",
+        embedding_function=embedding_fn
+    )
 
     q = _boosted_query(query) if use_keyword_boost else query
     result = collection.query(
@@ -149,7 +157,7 @@ def retrieve_relevant_chunks(
             metric = (collection.metadata or {}).get("hnsw:space", "unknown")
         except Exception:
             metric = "unknown"
-        LOGGER.info("RAG vector metric=%s embedding_model=%s", metric, settings.embedding_model_name)
+        LOGGER.info("RAG vector metric=%s embedding_model=%s", metric, "sentence-transformers/all-MiniLM-L6-v2")
         for idx, chunk in enumerate(candidates[:5], start=1):
             LOGGER.info(
                 "RAG top5 #%d score=%.3f source=%s topic=%s version=%s",

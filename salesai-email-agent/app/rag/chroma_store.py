@@ -6,16 +6,22 @@ import re
 from pathlib import Path
 from typing import Dict, List
 
+
 import chromadb
+from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+
 
 from app.config import settings
 
 
+
+LOGGER = logging.getLogger(__name__)
 _client = chromadb.PersistentClient(path=settings.chroma_path)
 _collection = None
 _reply_collection = None
 _user_collection = None
-LOGGER = logging.getLogger(__name__)
+embedding_fn = SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
+LOGGER.info("Using HuggingFace embedding model: sentence-transformers/all-MiniLM-L6-v2")
 
 _REFUND_FILENAMES = {"refund", "refund_policy", "returns", "return_policy"}
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -136,7 +142,10 @@ def ensure_collection():
     """Create or get the project knowledge collection."""
     global _collection
     if _collection is None:
-        _collection = _client.get_or_create_collection(name=settings.chroma_collection)
+        _collection = _client.get_or_create_collection(
+            name="salesai_knowledge_v2",
+            embedding_function=embedding_fn
+        )
     return _collection
 
 
@@ -192,6 +201,13 @@ def refresh_knowledge_embeddings(folder_path: str) -> Dict[str, int]:
     - remove previous vectors for the same source file
     - chunk into semantic units
     - upsert new vectors with metadata needed for retrieval filtering
+    LOGGER = logging.getLogger(__name__)
+    _client = chromadb.PersistentClient(path=settings.chroma_path)
+    _collection = None
+    _reply_collection = None
+    _user_collection = None
+    embedding_fn = SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    LOGGER.info("Using HuggingFace embedding model: sentence-transformers/all-MiniLM-L6-v2")
     """
     folder = Path(folder_path)
     if not folder.exists():
@@ -237,7 +253,7 @@ def refresh_knowledge_embeddings(folder_path: str) -> Dict[str, int]:
                     "version": version,
                     "active": "true",
                     "chunk_index": str(idx),
-                    "embedding_model": settings.embedding_model_name,
+                    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
                 }
             )
 

@@ -180,7 +180,7 @@ def get_gmail_service() -> Optional[Any]:
                 return None
 
             flow = InstalledAppFlow.from_client_secrets_file(GOOGLE_CREDENTIALS_PATH, SCOPES)
-            creds = flow.run_local_server(host=GOOGLE_OAUTH_HOST, port=GOOGLE_OAUTH_PORT)
+            creds = flow.run_local_server( host="localhost", port=0)
 
             with open(GOOGLE_TOKEN_PATH, "w", encoding="utf-8") as token_file:
                 token_file.write(creds.to_json())

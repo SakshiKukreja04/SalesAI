@@ -31,7 +31,10 @@ load_dotenv()
 
 LOGGER = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.modify",
+]
 GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", os.getenv("GMAIL_CREDENTIALS_PATH", ""))
 GOOGLE_TOKEN_PATH = os.getenv("GOOGLE_TOKEN_PATH", os.getenv("GMAIL_TOKEN_PATH", ""))
 GOOGLE_OAUTH_HOST = os.getenv("GOOGLE_OAUTH_HOST", "localhost")

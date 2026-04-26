@@ -160,6 +160,30 @@ def _fallback_reply(strategy: str, intent: str, emotion: str, context_docs: List
     return base
 
 
+def _format_reply_sections(reply_text: str, intent: str) -> str:
+    """Format reply with proper text justification and spacing."""
+    if not reply_text.strip():
+        return reply_text
+    
+    # Split into logical paragraphs and add spacing
+    lines = reply_text.strip().split("\n")
+    formatted_lines = []
+    
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            formatted_lines.append(stripped)
+    
+    # Join with double newlines for better spacing
+    spaced = "\n\n".join(formatted_lines)
+    
+    # Clean up any excessive spacing
+    while "\n\n\n" in spaced:
+        spaced = spaced.replace("\n\n\n", "\n\n")
+    
+    return spaced
+
+
 def generate_reply(
     strategy: str,
     intent: str,
@@ -176,6 +200,7 @@ def generate_reply(
             f"{strict_prompt}\n\n"
             "Reply requirements:\n"
             f"{style_block}\n"
+            "Format reply with clear sections and line breaks for readability.\n"
         )
     else:
         context_block = "\n\n".join(context_docs) if context_docs else "No internal policy context found."
@@ -187,16 +212,19 @@ def generate_reply(
             "Use similar past customer messages only for continuity and tone, not policy facts.\n"
             "If context is insufficient, ask one short follow-up question instead of inventing details.\n"
             "Keep tone professional, empathetic, and concise.\n"
-            "Do not mention internal tools, vector DB, or model names.\n\n"
+            "Do not mention internal tools, vector DB, or model names.\n"
+            "Format reply with clear sections and line breaks between topics for readability.\n\n"
             f"{style_block}\n\n"
             f"Customer message: {customer_text}\n\n"
             f"Relevant policy context:\n{context_block}\n\n"
             f"Similar past customer messages:\n{user_history_block}\n\n"
-            "Output: A complete email body only."
+            "Output: A complete email body only. Use line breaks to separate sections."
         )
 
     generated = _gemini_generate(prompt)
     if generated:
-        return generated
+        formatted = _format_reply_sections(generated, intent)
+        return formatted
 
-    return _fallback_reply(strategy=strategy, intent=intent, emotion=emotion, context_docs=context_docs)
+    fallback = _fallback_reply(strategy=strategy, intent=intent, emotion=emotion, context_docs=context_docs)
+    return _format_reply_sections(fallback, intent)

@@ -198,6 +198,31 @@ def _get_gmail_service() -> Optional[object]:
         return None
 
 
+def _text_to_html_justified(text: str) -> str:
+    """Convert plain text email body to HTML with justified alignment."""
+    # Escape HTML special characters
+    html_text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    
+    # Convert newlines to <br> and paragraph breaks to <p> tags
+    paragraphs = html_text.split("\n\n")
+    html_paragraphs = []
+    
+    for para in paragraphs:
+        # Convert single line breaks within paragraph to <br>
+        para_html = para.replace("\n", "<br>")
+        if para_html.strip():
+            html_paragraphs.append(f"<p style='text-align: justify; line-height: 1.6;'>{para_html}</p>")
+    
+    full_html = "\n".join(html_paragraphs)
+    
+    # Wrap in basic HTML structure
+    return f"""<html>
+<body style='font-family: Arial, sans-serif; color: #333;'>
+{full_html}
+</body>
+</html>"""
+
+
 def _send_via_gmail_api(to_email: str, subject: str, body: str) -> bool:
     """Send email through Gmail API.
     
@@ -219,7 +244,9 @@ def _send_via_gmail_api(to_email: str, subject: str, body: str) -> bool:
             LOGGER.warning("SMTP_EMAIL or GOOGLE_AUTH_EMAIL not configured for Gmail API")
             return False
         
-        message = MIMEText(body)
+        # Convert to HTML with justified text
+        html_body = _text_to_html_justified(body)
+        message = MIMEText(html_body, "html")
         message["to"] = to_email
         message["from"] = from_email
         message["subject"] = subject
@@ -254,7 +281,9 @@ def _send_via_smtp(to_email: str, subject: str, body: str) -> bool:
         LOGGER.error("SMTP_EMAIL/SMTP_PASSWORD are required for SMTP sending")
         return False
     
-    msg = MIMEText(body)
+    # Convert to HTML with justified text
+    html_body = _text_to_html_justified(body)
+    msg = MIMEText(html_body, "html")
     msg["Subject"] = subject
     msg["From"] = settings.smtp_email
     msg["To"] = to_email

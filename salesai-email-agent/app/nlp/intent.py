@@ -193,3 +193,90 @@ def classify_intent_for_email(email_id: str, text: str) -> Dict[str, str]:
     result = classify_intent(text)
     LOGGER.info("email_id=%s | intent=%s | confidence=%s", email_id, result["intent"], result["confidence"])
     return result
+
+
+def _confidence_to_float(confidence_str: str) -> float:
+    """Convert confidence string (high/medium/low) to float (0.0-1.0)."""
+    confidence = (confidence_str or "").strip().lower()
+    if confidence == "high":
+        return 0.9
+    elif confidence == "medium":
+        return 0.7
+    else:
+        return 0.5
+
+
+def detect_intent_emotion_gemini(text: str) -> Dict[str, float | str]:
+    """Classify intent using Gemini with standardized float confidence output.
+    
+    Returns:
+        Dictionary with keys:
+        - intent: str
+        - intent_confidence: float (0.0-1.0)
+    """
+    if not text or not text.strip():
+        LOGGER.info("Intent input text is empty, returning fallback")
+        return {
+            "intent": "Inquiry",
+            "intent_confidence": 0.5,
+        }
+
+    api_key = os.getenv("GEMINI_API_KEY", "")
+
+    if not api_key:
+        result = _heuristic_fallback(text)
+        confidence = _confidence_to_float(result["confidence"])
+        LOGGER.info(
+            "Gemini intent: input=%r | intent=%s (%.2f)",
+            text,
+            result["intent"],
+            confidence,
+        )
+        return {
+            "intent": result["intent"],
+            "intent_confidence": confidence,
+        }
+
+    prompt = (
+        "You are an AI assistant for an e-commerce company.\n\n"
+        "Classify the following customer message into ONE intent only from:\n"
+        "Complaint, Inquiry, Refund Request, Order Status, Product Question.\n\n"
+        "Also estimate confidence as High, Medium, or Low.\n\n"
+        "Return output ONLY in this JSON format:\n"
+        "{\n"
+        "    \"intent\": \"...\",\n"
+        "    \"confidence\": \"...\"\n"
+        "}\n\n"
+        f"Customer message:\n{text}"
+    )
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+
+        response_text = _generate_with_retry(genai, prompt)
+
+        result = _parse_model_json(response_text)
+        if result == FALLBACK_RESULT:
+            result = _heuristic_fallback(text)
+
+        confidence = _confidence_to_float(result["confidence"])
+        LOGGER.info(
+            "Gemini intent: intent=%s (%.2f)",
+            result["intent"],
+            confidence,
+        )
+        return {
+            "intent": result["intent"],
+            "intent_confidence": confidence,
+        }
+
+    except Exception as exc:
+        LOGGER.warning("Gemini intent classification failed: %s", exc)
+        result = _heuristic_fallback(text)
+        confidence = _confidence_to_float(result["confidence"])
+        return {
+            "intent": result["intent"],
+            "intent_confidence": confidence,
+        }

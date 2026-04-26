@@ -157,13 +157,22 @@ def detect_emotion(text: str) -> Dict[str, str]:
 
     prompt = (
         "You are an AI assistant for customer sentiment analysis.\n\n"
-        "Classify the emotional tone of the following customer message into ONE of:\n"
-        "positive, neutral, frustrated, angry, urgent, confused.\n\n"
-        "Also estimate confidence as High, Medium, or Low.\n\n"
+        "STRICT EMOTION CLASSIFICATION:\n"
+        "Choose ONE emotion from EXACTLY these categories based on keywords and tone:\n"
+        "- angry: Words like 'furious', 'unacceptable', 'worst', 'angry'\n"
+        "- frustrated: Words like 'annoyed', 'upset', 'still waiting', 'frustrated'\n"
+        "- urgent: Words like 'urgent', 'asap', 'immediately', 'right now'\n"
+        "- confused: Words like 'don't understand', 'how', 'why', 'confused'\n"
+        "- positive: Words like 'thanks', 'great', 'happy', 'love', 'appreciate'\n"
+        "- neutral: No emotional language, factual tone, or informational\n\n"
+        "CONFIDENCE LEVELS:\n"
+        "- High: Multiple keywords match, very clear emotion\n"
+        "- Medium: Some keywords match, reasonably clear\n"
+        "- Low: Few keywords, unclear or mixed emotions\n\n"
         "Return ONLY valid JSON:\n"
         "{\n"
-        "    \"emotion\": \"...\",\n"
-        "    \"confidence\": \"...\"\n"
+        "    \"emotion\": \"<EXACT emotion name>\",\n"
+        "    \"confidence\": \"<High|Medium|Low>\"\n"
         "}\n\n"
         f"Customer message:\n{text}"
     )
@@ -194,3 +203,90 @@ def detect_emotion_for_email(email_id: str, text: str) -> Dict[str, str]:
     result = detect_emotion(text)
     LOGGER.info("email_id=%s | emotion=%s | confidence=%s", email_id, result["emotion"], result["confidence"])
     return result
+
+
+def _confidence_to_float(confidence_str: str) -> float:
+    """Convert confidence string (high/medium/low) to float (0.0-1.0)."""
+    confidence = (confidence_str or "").strip().lower()
+    if confidence == "high":
+        return 0.9
+    elif confidence == "medium":
+        return 0.7
+    else:
+        return 0.5
+
+
+def detect_intent_emotion_gemini(text: str) -> Dict[str, float | str]:
+    """Detect emotion using Gemini with standardized float confidence output.
+    
+    Returns:
+        Dictionary with keys:
+        - emotion: str
+        - emotion_confidence: float (0.0-1.0)
+    """
+    if not text or not text.strip():
+        LOGGER.info("Emotion input text is empty, returning fallback")
+        return {
+            "emotion": "neutral",
+            "emotion_confidence": 0.5,
+        }
+
+    api_key = os.getenv("GEMINI_API_KEY", "")
+
+    if not api_key:
+        result = _heuristic_fallback(text)
+        confidence = _confidence_to_float(result["confidence"])
+        LOGGER.info(
+            "Gemini emotion: input=%r | emotion=%s (%.2f)",
+            text,
+            result["emotion"],
+            confidence,
+        )
+        return {
+            "emotion": result["emotion"],
+            "emotion_confidence": confidence,
+        }
+
+    prompt = (
+        "You are an AI assistant for customer sentiment analysis.\n\n"
+        "Classify the emotional tone of the following customer message into ONE of:\n"
+        "positive, neutral, frustrated, angry, urgent, confused.\n\n"
+        "Also estimate confidence as High, Medium, or Low.\n\n"
+        "Return ONLY valid JSON:\n"
+        "{\n"
+        "    \"emotion\": \"...\",\n"
+        "    \"confidence\": \"...\"\n"
+        "}\n\n"
+        f"Customer message:\n{text}"
+    )
+
+    try:
+        import google.generativeai as genai
+
+        genai.configure(api_key=api_key)
+
+        response_text = _generate_with_retry(genai, prompt)
+
+        result = _parse_model_json(response_text)
+        if result == FALLBACK_RESULT:
+            result = _heuristic_fallback(text)
+
+        confidence = _confidence_to_float(result["confidence"])
+        LOGGER.info(
+            "Gemini emotion: emotion=%s (%.2f)",
+            result["emotion"],
+            confidence,
+        )
+        return {
+            "emotion": result["emotion"],
+            "emotion_confidence": confidence,
+        }
+
+    except Exception as exc:
+        LOGGER.warning("Gemini emotion detection failed: %s", exc)
+        result = _heuristic_fallback(text)
+        confidence = _confidence_to_float(result["confidence"])
+        return {
+            "emotion": result["emotion"],
+            "emotion_confidence": confidence,
+        }

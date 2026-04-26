@@ -13,6 +13,7 @@ from app.db.supabase_client import log_interaction, save_email_record
 from app.email.safety_middleware import enforce_email_safety
 from app.email.send_email import send_email, send_email_reply, extract_customer_name
 from app.memory.reply_memory import store_reply_memory
+from app.nlp.dual_llm import select_best_nlp_output
 from app.nlp.emotion import detect_emotion
 from app.nlp.intent import classify_intent
 from app.nlp.preprocess import clean_query_text, preprocess_text
@@ -169,23 +170,22 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
         # Step 1: Preprocess and analyze
         normalized_text = preprocess_text(body)
         
-        # Step 2: Intent classification
-        intent_data = classify_intent(normalized_text)
-        intent = intent_data["intent"]
-        intent_confidence = intent_data["confidence"]
-        
-        # Step 3: Emotion detection
-        emotion_data = detect_emotion(normalized_text)
-        emotion = emotion_data["emotion"]
-        emotion_confidence = emotion_data["confidence"]
+        # Step 2-3: Dual-LLM intent and emotion detection with automatic selection
+        nlp_result = select_best_nlp_output(normalized_text)
+        intent = nlp_result.get("intent", "Inquiry")
+        intent_confidence = float(nlp_result.get("intent_confidence", 0.5))
+        emotion = nlp_result.get("emotion", "neutral")
+        emotion_confidence = float(nlp_result.get("emotion_confidence", 0.5))
+        selected_model = nlp_result.get("selected_model", "unknown")
         
         LOGGER.debug(
-            "[%s] NLP Results: intent=%s (%.2f), emotion=%s (%.2f)",
+            "[%s] NLP Results: intent=%s (%.2f), emotion=%s (%.2f) [selected=%s]",
             request_id,
             intent,
             intent_confidence,
             emotion,
             emotion_confidence,
+            selected_model,
         )
         
         # Step 4-5: Retrieve context from RAG
@@ -301,6 +301,7 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
                     "emotion_confidence": emotion_confidence,
                     "strategy": strategy,
                     "reply": reply,
+                    "selected_model": selected_model,
                 }
             )
             
@@ -398,6 +399,7 @@ def handle_customer_email(customer_email: str, subject: str, body: str) -> Dict[
                     "emotion_confidence": emotion_confidence,
                     "strategy": strategy,
                     "reply": safe_reply,
+                    "selected_model": selected_model,
                 }
             )
 

@@ -16,7 +16,9 @@ from typing import Optional
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+# pyrefly: ignore [missing-import]
 from googleapiclient.discovery import build
+# pyrefly: ignore [missing-import]
 from googleapiclient.errors import HttpError
 
 from app.config import settings
@@ -137,17 +139,16 @@ EMAIL_ADDRESS = os.getenv("SMTP_EMAIL")
 EMAIL_PASSWORD = os.getenv("SMTP_PASSWORD")
 
 # Email signature
-DEFAULT_SIGNATURE = "Best regards,\nShopiFyX Support Team"
+DEFAULT_SIGNATURE = "Best regards,\nCustomer Support Team\nShopiFyX"
 
 
 def _with_signature(body: str) -> str:
     """Append configured signature unless it already exists in reply body."""
     content = (body or "").strip()
-    signature = (settings.reply_signature or "").strip()
-    if not signature:
-        return content
+    raw_signature = (settings.reply_signature or DEFAULT_SIGNATURE).strip()
+    signature = raw_signature.replace("\\n", "\n").strip()
 
-    if signature.lower() in content.lower():
+    if "best regards" in content.lower() or "customer support team" in content.lower():
         return content
 
     if not content:
@@ -163,11 +164,15 @@ def _with_customer_greeting(body: str, customer_name: str) -> str:
         return content
 
     first_line = content.splitlines()[0].strip().lower()
-    if first_line.startswith("hi ") or first_line.startswith("hello "):
+    if first_line.startswith("hi ") or first_line.startswith("hi,") or first_line.startswith("hello "):
         return content
 
-    safe_name = (customer_name or "").strip() or "Valued Customer"
-    return f"Hi {safe_name},\n\n{content}"
+    safe_name = (customer_name or "").strip()
+    if safe_name and safe_name.lower() not in {"valued customer", "customer", "support", "shopifyx", "user", "none", "null"}:
+        first_name = safe_name.split()[0].title()
+        return f"Hi {first_name},\n\n{content}"
+
+    return f"Hi,\n\n{content}"
 
 
 def _get_gmail_service() -> Optional[object]:
@@ -323,8 +328,8 @@ def send_email(to_email: str, subject: str, body: str, use_reply_prefix: bool = 
     if not customer_name:
         customer_name = extract_customer_name(recipient)
 
-    personalized_body = _with_customer_greeting(body, customer_name)
-    final_body = _with_signature(personalized_body)
+    from app.agents.generator import normalize_customer_response
+    final_body = normalize_customer_response(body, customer_name=customer_name)
     final_subject = f"Re: {subject}" if use_reply_prefix and not subject.startswith("Re:") else subject
     
     # Mock mode for development
@@ -402,13 +407,9 @@ def send_email_reply(to: str, subject: str, body: str, customer_name: str = "") 
         # Format subject with "Re: " prefix
         reply_subject = f"Re: {subject}" if not subject.startswith("Re:") else subject
         
-        # Format email body with personalized greeting and signature
-        formatted_body = f"""Hi {customer_name},
-
-{body}
-
-{DEFAULT_SIGNATURE}
-"""
+        # Format email body using standardized plain-text normalizer
+        from app.agents.generator import normalize_customer_response
+        formatted_body = normalize_customer_response(body, customer_name=customer_name)
         
         # Create MIME message
         msg = MIMEText(formatted_body)

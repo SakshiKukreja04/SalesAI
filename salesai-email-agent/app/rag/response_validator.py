@@ -5,7 +5,14 @@ import re
 from typing import List
 
 
-SAFE_FALLBACK_RESPONSE = "I'm not sure, let me connect you to support."
+SAFE_FALLBACK_RESPONSE = (
+    "Hi,\n\n"
+    "Thank you for contacting ShopiFyX.\n\n"
+    "We are currently reviewing your request with our support team to provide you with the most accurate assistance. A support specialist will follow up with you shortly.\n\n"
+    "Best regards,\n"
+    "Customer Support Team\n"
+    "ShopiFyX"
+)
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _FACT_RE = re.compile(
@@ -13,6 +20,26 @@ _FACT_RE = re.compile(
     re.IGNORECASE,
 )
 _WORD_RE = re.compile(r"[a-z0-9]+")
+
+_DISALLOWED_PATTERNS = [
+    (re.compile(r"\*\*[^*]+\*\*"), "markdown_bold"),
+    (re.compile(r"__[^_]+__"), "markdown_bold"),
+    (re.compile(r"^#{1,6}\s+", re.MULTILINE), "markdown_heading"),
+    (re.compile(r"^\s*[-*•+]\s+", re.MULTILINE), "markdown_bullet"),
+    (re.compile(r"^\s*\d+\.\s+", re.MULTILINE), "numbered_list"),
+    (re.compile(r"```"), "code_block"),
+    (re.compile(r"^\s*\|.*\|\s*$", re.MULTILINE), "markdown_table"),
+]
+
+_PROMPT_TRACE_PATTERNS = [
+    re.compile(r"\buser query\s*:", re.IGNORECASE),
+    re.compile(r"\brole\s*:", re.IGNORECASE),
+    re.compile(r"\bconstraint\s+\d", re.IGNORECASE),
+    re.compile(r"\bself-correction", re.IGNORECASE),
+    re.compile(r"\bconfidence score\s*:", re.IGNORECASE),
+    re.compile(r"here is (?:the|your|a) (?:response|email|reply)", re.IGNORECASE),
+    re.compile(r"\bnext steps\s*:\s*none\b", re.IGNORECASE),
+]
 
 
 @dataclass
@@ -58,8 +85,36 @@ def _has_fact_mismatch(answer: str, context_text: str) -> bool:
     return False
 
 
+def has_formatting_issues(answer: str) -> tuple[bool, str]:
+    """Check for unwanted markdown formatting or prompt traces."""
+    if not answer:
+        return True, "empty_answer"
+
+    for pattern, reason in _DISALLOWED_PATTERNS:
+        if pattern.search(answer):
+            return True, f"format_{reason}"
+
+    for trace_pattern in _PROMPT_TRACE_PATTERNS:
+        if trace_pattern.search(answer):
+            return True, "format_prompt_trace"
+
+    return False, "ok"
+
+
 def validate_response(answer: str, context_chunks: List[str]) -> ValidationResult:
-    """Validate that answer is grounded and facts are present in context."""
+    """Validate that answer is grounded, factual, and strictly follows plain-text rules."""
+    if not answer or not answer.strip():
+        return ValidationResult(is_valid=False, reason="empty_answer", grounded_sentence_count=0)
+
+    # Check formatting rules
+    is_bad_format, format_reason = has_formatting_issues(answer)
+    if is_bad_format:
+        return ValidationResult(
+            is_valid=False,
+            reason=format_reason,
+            grounded_sentence_count=0,
+        )
+
     if not context_chunks:
         return ValidationResult(is_valid=False, reason="no_context", grounded_sentence_count=0)
 

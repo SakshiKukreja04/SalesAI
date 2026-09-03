@@ -5,14 +5,16 @@ import logging
 from typing import List
 
 from app.config import settings
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+# pyrefly: ignore [missing-import]
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+# pyrefly: ignore [missing-import]
 import chromadb
 from app.rag.chroma_store import ensure_user_collection
 
 
 LOGGER = logging.getLogger(__name__)
-embedding_fn = SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
-LOGGER.info("Using HuggingFace retrieval model: sentence-transformers/all-MiniLM-L6-v2")
+embedding_fn = DefaultEmbeddingFunction()
+LOGGER.info("Using ONNX retrieval model: all-MiniLM-L6-v2 via DefaultEmbeddingFunction")
 _client = chromadb.PersistentClient(path=settings.chroma_path)
 
 _CRITICAL_KEYWORDS = {"refund", "return", "shipping", "delivery", "warranty"}
@@ -192,18 +194,24 @@ def retrieve_top_k(query: str, k: int = 2) -> List[str]:
 
 def retrieve_similar_user_messages(query: str, k: int = 2) -> List[str]:
     """Retrieve top-k similar past customer messages from user-memory collection."""
-    collection = ensure_user_collection()
-    result = collection.query(query_texts=[query], n_results=k)
+    try:
+        collection = ensure_user_collection()
+        if collection.count() == 0:
+            return []
+        result = collection.query(query_texts=[query], n_results=min(k, collection.count()))
 
-    docs_nested = result.get("documents", [[]])
-    ids_nested = result.get("ids", [[]])
+        docs_nested = result.get("documents", [[]])
+        ids_nested = result.get("ids", [[]])
 
-    docs = docs_nested[0] if docs_nested else []
-    ids = ids_nested[0] if ids_nested else []
+        docs = docs_nested[0] if docs_nested else []
+        ids = ids_nested[0] if ids_nested else []
 
-    formatted: List[str] = []
-    for idx, doc in enumerate(docs):
-        doc_id = ids[idx] if idx < len(ids) else f"user-doc-{idx}"
-        formatted.append(f"User message ({doc_id}):\n{doc}")
+        formatted: List[str] = []
+        for idx, doc in enumerate(docs):
+            doc_id = ids[idx] if idx < len(ids) else f"user-doc-{idx}"
+            formatted.append(f"User message ({doc_id}):\n{doc}")
 
-    return formatted
+        return formatted
+    except Exception as exc:
+        LOGGER.debug("retrieve_similar_user_messages fallback on error: %s", exc)
+        return []

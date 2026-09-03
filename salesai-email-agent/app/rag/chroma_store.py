@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Dict, List
 
 
+# pyrefly: ignore [missing-import]
 import chromadb
-from chromadb.utils.embedding_functions import SentenceTransformerEmbeddingFunction
+# pyrefly: ignore [missing-import]
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 
 from app.config import settings
@@ -20,8 +22,8 @@ _client = chromadb.PersistentClient(path=settings.chroma_path)
 _collection = None
 _reply_collection = None
 _user_collection = None
-embedding_fn = SentenceTransformerEmbeddingFunction(model_name="sentence-transformers/all-MiniLM-L6-v2")
-LOGGER.info("Using HuggingFace embedding model: sentence-transformers/all-MiniLM-L6-v2")
+embedding_fn = DefaultEmbeddingFunction()
+LOGGER.info("Using ONNX embedding model: all-MiniLM-L6-v2 via DefaultEmbeddingFunction")
 
 _REFUND_FILENAMES = {"refund", "refund_policy", "returns", "return_policy"}
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
@@ -87,15 +89,19 @@ def _semantic_chunk_text(text: str, min_tokens: int = 200, max_tokens: int = 500
 def _infer_topic(file_path: Path) -> str:
     """Infer topic metadata from the source filename."""
     stem = file_path.stem.lower()
-    if stem in _REFUND_FILENAMES:
+    if stem in _REFUND_FILENAMES or "refund" in stem or "return" in stem or "exchange" in stem:
         return "refund_policy"
-    if "shipping" in stem:
+    if "payment" in stem or "charge" in stem or "debit" in stem:
+        return "payment_policy"
+    if "promotion" in stem or "coupon" in stem or "discount" in stem or "gift_card" in stem:
+        return "promotions_policy"
+    if "shipping" in stem or "delivery" in stem:
         return "shipping_policy"
     if "warranty" in stem:
         return "warranty_policy"
     if "support" in stem:
         return "support_policy"
-    if "product" in stem:
+    if "product" in stem or "size" in stem or "sizing" in stem or "specification" in stem:
         return "product_info"
     if "faq" in stem:
         return "faq"
@@ -161,8 +167,10 @@ def ensure_user_collection():
     """Create or get the project user-message memory collection."""
     global _user_collection
     if _user_collection is None:
-        # Reuse configured reply-memory collection for conversational memory.
-        _user_collection = _client.get_or_create_collection(name=settings.chroma_reply_collection)
+        _user_collection = _client.get_or_create_collection(
+            name="salesai_user_messages",
+            embedding_function=embedding_fn,
+        )
     return _user_collection
 
 
@@ -219,7 +227,10 @@ def refresh_knowledge_embeddings(folder_path: str) -> Dict[str, int]:
     total_chunks = 0
     total_deleted = 0
 
-    for file_path in sorted(folder.glob("*.txt")):
+    for file_path in sorted(folder.iterdir()):
+        if not file_path.is_file() or file_path.suffix.lower() not in {".txt", ".md"}:
+            continue
+
         total_files += 1
         raw_text = file_path.read_text(encoding="utf-8")
         chunks = _chunk_document(file_path=file_path, raw_text=raw_text)
@@ -279,11 +290,11 @@ def seed_knowledge_from_folder(folder_path: str) -> None:
 def hard_reindex_knowledge(folder_path: str) -> Dict[str, int]:
     """Delete and recreate knowledge collection before reindexing from scratch."""
     global _collection
-    try:
-        _client.delete_collection(name=settings.chroma_collection)
-    except Exception:
-        # Collection may not exist on first run.
-        pass
+    for col_name in ["salesai_knowledge_v2", settings.chroma_collection, "salesai_knowledge"]:
+        try:
+            _client.delete_collection(name=col_name)
+        except Exception:
+            pass
 
     _collection = None
     ensure_collection()

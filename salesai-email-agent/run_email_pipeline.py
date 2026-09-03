@@ -27,7 +27,9 @@ from app.email.fetch_emails import fetch_unread_emails, mark_email_as_read
 from app.email.send_email import extract_customer_name
 from app.nlp.emotion import detect_emotion_for_email
 from app.nlp.intent import classify_intent_for_email
+from app.nlp.preprocess import strip_email_history
 from app.rag.chroma_store import ensure_collection, refresh_knowledge_embeddings
+
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -161,6 +163,7 @@ def safe_send_email(email_id: str, customer_email: str, subject: str, body: str)
         customer_email=customer_email,
         subject=subject,
         body=body,
+        email_id=email_id,
     )
 
     final_status = result.get("status", "failed")
@@ -200,13 +203,14 @@ def _process_email(email: Dict[str, str]) -> Dict[str, str]:
     timestamp = email.get("timestamp", "")
 
     body = clean_text(email.get("body", ""))
-    if not body:
-        body = "[No readable body content]"
+    unquoted_body = strip_email_history(body) or body
+    if not unquoted_body:
+        unquoted_body = "[No readable body content]"
 
     logger.info("Email received: id=%s sender=%s subject=%s", email_id, sender, subject)
 
     try:
-        intent_result = classify_intent_for_email(email_id=email_id, text=body)
+        intent_result = classify_intent_for_email(email_id=email_id, text=unquoted_body)
         intent = intent_result.get("intent", "unknown")
         logger.info("Intent detected: id=%s intent=%s", email_id, intent)
     except Exception:
@@ -214,7 +218,7 @@ def _process_email(email: Dict[str, str]) -> Dict[str, str]:
         logger.exception("Intent detection failed for email id=%s", email_id)
 
     try:
-        emotion_result = detect_emotion_for_email(email_id=email_id, text=body)
+        emotion_result = detect_emotion_for_email(email_id=email_id, text=unquoted_body)
         emotion = emotion_result.get("emotion", "unknown")
         logger.info("Emotion detected: id=%s emotion=%s", email_id, emotion)
     except Exception:
@@ -232,6 +236,7 @@ def _process_email(email: Dict[str, str]) -> Dict[str, str]:
     }
 
     return processed
+
 
 
 def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:

@@ -24,10 +24,10 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    ensure_collection()
     if args.hard_reset:
         stats = hard_reindex_knowledge("data/knowledge")
     else:
+        ensure_collection()
         stats = refresh_knowledge_embeddings("data/knowledge")
     LOGGER.info(
         "Refresh complete: files=%d chunks=%d deleted=%d",

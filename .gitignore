@@ -40,3 +40,5 @@ salesai-email-agent/data/chroma/
 .idea/
 .DS_Store
 Thumbs.db
+
+gmail_token.json

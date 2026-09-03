@@ -1,119 +1,98 @@
-"""Unified dual-LLM interface for intent and emotion detection with automatic selection."""
+"""Unified dual-LLM interface for memory-aware intent and emotion detection with automatic selection."""
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from typing import Dict
+from typing import Any, Dict, List, Optional
 
 from app.nlp.groq_client import get_intent_and_emotion_groq
 from app.nlp.llm_selector import select_best_llm_output
-
+from app.nlp.memory_nlp_classifier import classify_intent_and_emotion_with_memory
 
 LOGGER = logging.getLogger(__name__)
 
 
-def detect_intent_emotion_gemini(text: str) -> Dict[str, float | str]:
-    """Detect both intent and emotion using Gemini API.
-    
-    Args:
-        text: Customer message text
-    
-    Returns:
-        Dictionary with keys:
-        - intent: str
-        - intent_confidence: float (0.0-1.0)
-        - emotion: str
-        - emotion_confidence: float (0.0-1.0)
-    """
-    from app.nlp.intent import detect_intent_emotion_gemini as gemini_intent
-    from app.nlp.emotion import detect_intent_emotion_gemini as gemini_emotion
-    
+def detect_intent_emotion_gemini(
+    text: str,
+    customer_memory: Optional[Any] = None,
+    kb_context: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Detect both intent and emotion using Gemini API with memory supporting evidence."""
     if not text or not text.strip():
         LOGGER.warning("Gemini dual detection: input text is empty")
         return {
-            "intent": "Inquiry",
+            "intent": "general_support",
             "intent_confidence": 0.5,
             "emotion": "neutral",
             "emotion_confidence": 0.5,
+            "reasoning_summary": "Empty customer message.",
+            "memory_used": False,
         }
-    
+
     try:
-        # Get intent result
-        intent_result = gemini_intent(text)
-        intent = intent_result.get("intent", "Inquiry")
-        intent_conf = float(intent_result.get("intent_confidence", 0.5))
-        
-        # Get emotion result
-        emotion_result = gemini_emotion(text)
-        emotion = emotion_result.get("emotion", "neutral")
-        emotion_conf = float(emotion_result.get("emotion_confidence", 0.5))
-        
-        result = {
-            "intent": intent,
-            "intent_confidence": intent_conf,
-            "emotion": emotion,
-            "emotion_confidence": emotion_conf,
-        }
-        
-        LOGGER.info(
-            "[GEMINI ANALYSIS] "
-            "intent=%s (confidence=%.2f) | emotion=%s (confidence=%.2f)",
-            intent,
-            intent_conf,
-            emotion,
-            emotion_conf,
+        result = classify_intent_and_emotion_with_memory(
+            message=text,
+            customer_memory=customer_memory,
+            kb_context=kb_context,
         )
-        
+
+        LOGGER.info(
+            "[GEMINI NLP ANALYSIS] intent=%s (conf=%.2f) | emotion=%s (conf=%.2f) | memory_used=%s | reason=%s",
+            result.get("intent"),
+            result.get("intent_confidence"),
+            result.get("emotion"),
+            result.get("emotion_confidence"),
+            result.get("memory_used"),
+            result.get("reasoning_summary"),
+        )
         return result
-    
+
     except Exception as exc:
         LOGGER.error("Gemini dual detection failed: %s", exc)
         return {
-            "intent": "Inquiry",
+            "intent": "general_support",
             "intent_confidence": 0.5,
             "emotion": "neutral",
             "emotion_confidence": 0.5,
+            "reasoning_summary": f"Fallback due to error: {exc}",
+            "memory_used": False,
         }
 
 
-def select_best_nlp_output(text: str) -> Dict[str, float | str]:
-    """Run both Gemini and Groq in parallel and select best result using confidence scoring.
+def select_best_nlp_output(
+    text: str,
+    customer_memory: Optional[Any] = None,
+    kb_context: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Run both Gemini (with memory context) and Groq in parallel and select best result.
     
-    This function:
-    1. Calls both Gemini and Groq APIs in parallel
-    2. Compares their confidence scores
-    3. Selects the result with highest combined score
-    4. Falls back gracefully if one LLM fails
-    
-    Args:
-        text: Customer message text
-    
-    Returns:
-        Dictionary with keys:
-        - intent: str
-        - intent_confidence: float (0.0-1.0)
-        - emotion: str
-        - emotion_confidence: float (0.0-1.0)
-        - selected_model: "gemini" or "groq"
-        - gemini_score: float
-        - groq_score: float
+    Returns dictionary with:
+    - intent: str
+    - intent_confidence: float
+    - emotion: str
+    - emotion_confidence: float
+    - reasoning_summary: str
+    - memory_used: bool
+    - selected_model: str ("gemini" | "groq" | "default")
     """
     try:
-        # Try to run both APIs in parallel using threading
         gemini_result = None
         groq_result = None
         gemini_error = None
         groq_error = None
-        
+
         def run_gemini():
             nonlocal gemini_result, gemini_error
             try:
-                gemini_result = detect_intent_emotion_gemini(text)
+                gemini_result = detect_intent_emotion_gemini(
+                    text=text,
+                    customer_memory=customer_memory,
+                    kb_context=kb_context,
+                )
             except Exception as exc:
                 gemini_error = exc
                 LOGGER.error("Gemini parallel execution failed: %s", exc)
-        
+
         def run_groq():
             nonlocal groq_result, groq_error
             try:
@@ -121,77 +100,71 @@ def select_best_nlp_output(text: str) -> Dict[str, float | str]:
             except Exception as exc:
                 groq_error = exc
                 LOGGER.error("Groq parallel execution failed: %s", exc)
-        
-        # Use threading for parallel execution
+
         import threading
-        
+
         gemini_thread = threading.Thread(target=run_gemini, daemon=False)
         groq_thread = threading.Thread(target=run_groq, daemon=False)
-        
+
         gemini_thread.start()
         groq_thread.start()
-        
-        # Wait for both to complete (with timeout)
-        gemini_thread.join(timeout=15)  # 15 second timeout per thread
+
+        gemini_thread.join(timeout=15)
         groq_thread.join(timeout=15)
-        
-        # Handle results with fallback logic
+
+        # Handle results
         if gemini_result and groq_result:
-            # Both succeeded - use selector
             final_result = select_best_llm_output(gemini_result, groq_result)
+            # Ensure memory fields are preserved from gemini_result if gemini won
+            if final_result.get("selected_model") == "gemini" or gemini_result.get("memory_used"):
+                final_result["reasoning_summary"] = gemini_result.get("reasoning_summary", "Classified with Gemini.")
+                final_result["memory_used"] = gemini_result.get("memory_used", False)
+            else:
+                final_result["reasoning_summary"] = groq_result.get("reasoning_summary", "Classified with Groq.")
+                final_result["memory_used"] = False
             return final_result
-        
+
         elif gemini_result:
-            # Groq failed - use Gemini
-            LOGGER.warning(
-                "[DUAL-LLM FALLBACK] Groq failed, using Gemini: "
-                "intent=%s (%.2f), emotion=%s (%.2f)",
-                gemini_result.get("intent", "?"),
+            LOGGER.info(
+                "[DUAL-LLM] Using Gemini: intent=%s (%.2f), emotion=%s (%.2f), memory_used=%s",
+                gemini_result.get("intent"),
                 gemini_result.get("intent_confidence", 0.0),
-                gemini_result.get("emotion", "?"),
+                gemini_result.get("emotion"),
                 gemini_result.get("emotion_confidence", 0.0),
+                gemini_result.get("memory_used"),
             )
             gemini_result["selected_model"] = "gemini"
-            gemini_result["gemini_score"] = 0.0
-            gemini_result["groq_score"] = 0.0
             return gemini_result
-        
+
         elif groq_result:
-            # Gemini failed - use Groq
-            LOGGER.warning(
-                "[DUAL-LLM FALLBACK] Gemini failed, using Groq: "
-                "intent=%s (%.2f), emotion=%s (%.2f)",
-                groq_result.get("intent", "?"),
+            LOGGER.info(
+                "[DUAL-LLM] Using Groq fallback: intent=%s (%.2f), emotion=%s (%.2f)",
+                groq_result.get("intent"),
                 groq_result.get("intent_confidence", 0.0),
-                groq_result.get("emotion", "?"),
+                groq_result.get("emotion"),
                 groq_result.get("emotion_confidence", 0.0),
             )
             groq_result["selected_model"] = "groq"
-            groq_result["gemini_score"] = 0.0
-            groq_result["groq_score"] = 0.0
+            groq_result["reasoning_summary"] = "Classified with Groq."
+            groq_result["memory_used"] = False
             return groq_result
-        
+
         else:
-            # Both failed - return default
-            LOGGER.error("[DUAL-LLM FALLBACK] Both Gemini and Groq failed, returning default")
-            return {
-                "intent": "Inquiry",
-                "intent_confidence": 0.5,
-                "emotion": "neutral",
-                "emotion_confidence": 0.5,
-                "selected_model": "default",
-                "gemini_score": 0.0,
-                "groq_score": 0.0,
-            }
-    
+            LOGGER.error("[DUAL-LLM] Both Gemini and Groq failed, using heuristic")
+            from app.nlp.memory_nlp_classifier import _heuristic_nlp_disambiguation
+            heuristic = _heuristic_nlp_disambiguation(text, customer_memory, kb_context)
+            data = heuristic.model_dump()
+            data["selected_model"] = "heuristic_fallback"
+            return data
+
     except Exception as exc:
         LOGGER.error("Dual LLM selection failed: %s", exc)
         return {
-            "intent": "Inquiry",
+            "intent": "general_support",
             "intent_confidence": 0.5,
             "emotion": "neutral",
             "emotion_confidence": 0.5,
+            "reasoning_summary": f"Fallback error: {exc}",
+            "memory_used": False,
             "selected_model": "error",
-            "gemini_score": 0.0,
-            "groq_score": 0.0,
         }

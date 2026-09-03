@@ -132,6 +132,12 @@ def create_table_if_not_exists() -> None:
         conn.close()
         logger.debug("PostgreSQL connection closed after create_table_if_not_exists")
 
+    try:
+        from app.db.customer_memory import ensure_memory_tables_exist
+        ensure_memory_tables_exist()
+    except Exception as exc:
+        logger.warning("Could not auto-create memory tables: %s", exc)
+
 
 def insert_email_data(email_data: Dict[str, Any]) -> bool:
     """Insert a single email record into the customer_emails table.

@@ -14,6 +14,24 @@ load_dotenv()
 
 LOGGER = logging.getLogger(__name__)
 
+DEFAULT_GROQ_MODELS = [
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "qwen/qwen3.6-27b",
+]
+
+
+def _model_candidates_from_env() -> list[str]:
+    """Build a prioritized Groq model list from env and known-safe fallbacks."""
+    configured = os.getenv("GROQ_MODEL", "").strip()
+    candidates = [configured] if configured else []
+    for model in DEFAULT_GROQ_MODELS:
+        if model not in candidates:
+            candidates.append(model)
+    return [name for name in candidates if name]
+
+
 ALLOWED_INTENTS = {
     "Complaint",
     "Inquiry",
@@ -142,9 +160,10 @@ def get_intent_and_emotion_groq(text: str) -> Dict[str, float | str]:
     
     try:
         from groq import Groq
-        
+
         client = Groq(api_key=api_key)
-        
+        model_candidates = _model_candidates_from_env()
+
         # Combined prompt for both intent and emotion
         prompt = (
             "You are an AI assistant for customer support intent and emotion analysis.\n\n"
@@ -181,21 +200,41 @@ def get_intent_and_emotion_groq(text: str) -> Dict[str, float | str]:
             f"Customer message:\n{text}"
         )
         
-        # Use temperature=0 for deterministic output
-        # Groq uses OpenAI-like chat.completions API
-        message = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",  # Current available Groq model
-            max_tokens=256,
-            temperature=0,  # Deterministic
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
-        )
-        
-        response_text = message.choices[0].message.content if message.choices else ""
+        last_error = None
+        response_text = ""
+
+        # Try the configured model first, then known-safe Groq models if one is unavailable.
+        for model_name in model_candidates:
+            try:
+                message = client.chat.completions.create(
+                    model=model_name,
+                    max_tokens=256,
+                    temperature=0,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        }
+                    ],
+                )
+                response_text = message.choices[0].message.content if message.choices else ""
+                if response_text.strip():
+                    break
+            except Exception as exc:  # pragma: no cover - runtime API-specific
+                last_error = exc
+                LOGGER.warning("Groq model %s unavailable, trying next candidate: %s", model_name, exc)
+                continue
+
+        if not response_text.strip():
+            if last_error is not None:
+                raise last_error
+            LOGGER.warning("Groq returned empty response from all model candidates")
+            return {
+                "intent": "Inquiry",
+                "intent_confidence": 0.5,
+                "emotion": "neutral",
+                "emotion_confidence": 0.5,
+            }
         
         if not response_text.strip():
             LOGGER.warning("Groq returned empty response")
@@ -229,36 +268,57 @@ def get_intent_and_emotion_groq(text: str) -> Dict[str, float | str]:
             }
         
         # Extract and validate intent
-        intent = str(data.get("intent", "Inquiry")).strip()
+        raw_intent = str(data.get("intent", "Inquiry")).strip()
         intent_conf_str = str(data.get("intent_confidence", "medium")).strip()
-        
-        if intent not in ALLOWED_INTENTS:
-            intent = "Inquiry"
+
+        if raw_intent not in ALLOWED_INTENTS:
+            raw_intent = "Inquiry"
         intent_confidence = _confidence_string_to_float(intent_conf_str)
-        
+
+        # Map to V3 taxonomy
+        intent_map = {
+            "Complaint": "complaint",
+            "Inquiry": "general_support",
+            "Refund Request": "refund_request",
+            "Order Status": "order_status",
+            "Product Question": "product_inquiry",
+        }
+        normalized_intent = intent_map.get(raw_intent, "general_support")
+
         # Extract and validate emotion
-        emotion = str(data.get("emotion", "neutral")).strip().lower()
+        raw_emotion = str(data.get("emotion", "neutral")).strip().lower()
         emotion_conf_str = str(data.get("emotion_confidence", "medium")).strip()
-        
-        if emotion not in ALLOWED_EMOTIONS:
-            emotion = "neutral"
+
+        if raw_emotion not in ALLOWED_EMOTIONS:
+            raw_emotion = "neutral"
         emotion_confidence = _confidence_string_to_float(emotion_conf_str)
-        
+
+        emotion_map = {
+            "positive": "satisfied",
+            "neutral": "neutral",
+            "frustrated": "frustrated",
+            "angry": "angry",
+            "urgent": "urgent",
+            "confused": "confused",
+        }
+        normalized_emotion = emotion_map.get(raw_emotion, "neutral")
+
         LOGGER.info(
             "[GROQ ANALYSIS] "
             "intent=%s (confidence=%.2f) | emotion=%s (confidence=%.2f)",
-            intent,
+            normalized_intent,
             intent_confidence,
-            emotion,
+            normalized_emotion,
             emotion_confidence,
         )
-        
+
         return {
-            "intent": intent,
+            "intent": normalized_intent,
             "intent_confidence": intent_confidence,
-            "emotion": emotion,
+            "emotion": normalized_emotion,
             "emotion_confidence": emotion_confidence,
         }
+
     
     except ImportError:
         LOGGER.error("Groq library not installed. Install with: pip install groq")

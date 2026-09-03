@@ -166,7 +166,16 @@ def process_email_endpoint(payload: EmailRequest) -> Dict[str, str]:
         }
     )
 
-    return result
+    normalized = dict(result)
+    for key in ("intent_confidence", "emotion_intensity"):
+        if key in normalized:
+            normalized[key] = str(normalized[key])
+    if "grounded" in normalized:
+        normalized["grounded"] = str(bool(normalized["grounded"]))
+    if "human_review_required" in normalized:
+        normalized["human_review_required"] = str(bool(normalized["human_review_required"]))
+
+    return normalized
 
 
 @app.get("/api/emails")

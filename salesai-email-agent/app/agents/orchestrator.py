@@ -27,6 +27,7 @@ from app.nlp.emotion import detect_emotion
 from app.nlp.intent import classify_intent
 from app.nlp.preprocess import clean_query_text, preprocess_text
 from app.rag.prompt_builder import build_strict_context_prompt
+from app.rag.query_guard import QueryClass, inspect_query
 from app.rag.response_validator import SAFE_FALLBACK_RESPONSE, validate_response
 from app.rag.retrieval import retrieve_relevant_chunks, retrieve_similar_user_messages
 
@@ -83,8 +84,10 @@ def _generate_validated_reply(
     return normalize_customer_response(SAFE_FALLBACK_RESPONSE, customer_name=customer_name), "fallback"
 
 
-def _calculate_confidence(context_docs: List[str], reply_memory: List[str], reply: str) -> float:
+def _calculate_confidence(context_docs: List[str], reply_memory: List[str], reply: str, is_conversational: bool = False) -> float:
     """Calculate overall pipeline confidence score."""
+    if is_conversational:
+        return 0.95
     confidence = 0.5
     if context_docs and len(context_docs) > 0:
         confidence += 0.15
@@ -200,21 +203,42 @@ def handle_customer_email(
         )
 
         # Step 7: Retrieve ShopiFyX KB context (independent from customer memory)
-        retrieval_query = clean_query_text(body)
-        query = f"subject: {subject}\nmessage: {retrieval_query or normalized_text}"
-        retrieval_result = retrieve_relevant_chunks(
-            query=query,
-            top_k=settings.rag_top_k,
-            min_similarity=settings.rag_similarity_threshold,
-            relaxed_fallback_k=settings.rag_relaxed_fallback_k,
-            use_keyword_boost=settings.rag_keyword_boost,
+        clean_intent = (intent or "").strip().lower()
+        guard_result = inspect_query(normalized_text)
+        is_conversational = (
+            clean_intent in {"thanks", "greeting", "conversational", "acknowledgement"}
+            or guard_result.classification == QueryClass.CONVERSATIONAL
         )
-        retrieved_chunks = retrieval_result.chunks
-        kb_context = [chunk.to_context_block() for chunk in retrieved_chunks]
-        LOGGER.info("[%s] [Stage 7/16] Retrieved %d internal KB policy chunks", request_id, len(kb_context))
+        is_guard_deflected = guard_result.classification in {
+            QueryClass.SUSPICIOUS,
+            QueryClass.OFF_TOPIC,
+            QueryClass.GIBBERISH,
+        }
+
+        if is_conversational or is_guard_deflected:
+            LOGGER.info(
+                "[%s] [Stage 7/16] Skipped RAG retrieval: is_conversational=%s, guard=%s",
+                request_id,
+                is_conversational,
+                guard_result.classification.value,
+            )
+            kb_context = []
+        else:
+            retrieval_query = clean_query_text(body)
+            query = f"subject: {subject}\nmessage: {retrieval_query or normalized_text}"
+            retrieval_result = retrieve_relevant_chunks(
+                query=query,
+                top_k=settings.rag_top_k,
+                min_similarity=settings.rag_similarity_threshold,
+                relaxed_fallback_k=settings.rag_relaxed_fallback_k,
+                use_keyword_boost=settings.rag_keyword_boost,
+            )
+            retrieved_chunks = retrieval_result.chunks
+            kb_context = [chunk.to_context_block() for chunk in retrieved_chunks]
+            LOGGER.info("[%s] [Stage 7/16] Retrieved %d internal KB policy chunks", request_id, len(kb_context))
 
         # Step 8: Retrieve relevant previous reply memory
-        similar_user_messages = retrieve_similar_user_messages(query=query, k=2)
+        similar_user_messages = retrieve_similar_user_messages(query=f"subject: {subject}\nmessage: {normalized_text}", k=2) if not (is_conversational or is_guard_deflected) else []
         reply_memory: List[str] = (customer_memory.previous_replies or []) + similar_user_messages
         LOGGER.info("[%s] [Stage 8/16] Assembled %d relevant previous reply/interaction patterns", request_id, len(reply_memory))
 
@@ -223,7 +247,23 @@ def handle_customer_email(
         LOGGER.info("[%s] [Stage 9/16] Selected response strategy: %s", request_id, strategy)
 
         # Step 10: Generate memory-aware response
-        if not kb_context:
+        if is_guard_deflected:
+            generated_reply = guard_result.suggested_reply or normalize_customer_response(SAFE_FALLBACK_RESPONSE, customer_name=customer_name)
+            gen_status = f"guard_{guard_result.classification.value}"
+            LOGGER.info("[%s] [Stage 10/16] Used QueryGuard suggested reply (%s) | len: %d chars", request_id, gen_status, len(generated_reply))
+        elif is_conversational:
+            closing = f"Hi {customer_name},\n\n" if customer_name and customer_name.strip() else "Hi,\n\n"
+            generated_reply = (
+                f"{closing}"
+                "You're very welcome! If you have any further questions or need additional assistance with your order, "
+                "please feel free to reach out. Have a wonderful day!\n\n"
+                "Best regards,\n"
+                "Customer Support Team\n"
+                "ShopiFyX"
+            )
+            gen_status = "conversational_direct"
+            LOGGER.info("[%s] [Stage 10/16] Generated conversational direct reply | len: %d chars", request_id, len(generated_reply))
+        elif not kb_context:
             LOGGER.warning("[%s] [Stage 10/16] No KB context found, using safe policy fallback", request_id)
             generated_reply = normalize_customer_response(SAFE_FALLBACK_RESPONSE, customer_name=customer_name)
         else:
@@ -241,10 +281,20 @@ def handle_customer_email(
             LOGGER.debug("[%s] [Stage 10/16] Draft Reply Content:\n%s", request_id, generated_reply)
 
         # Step 11: Validate response & Safety middleware
-        safe_reply, blocked, safety_reason = enforce_email_safety(answer=generated_reply, retrieved_context_chunks=kb_context)
+        safe_reply, blocked, safety_reason = enforce_email_safety(
+            answer=generated_reply,
+            retrieved_context_chunks=kb_context,
+            is_conversational_or_guarded=(is_conversational or is_guard_deflected),
+        )
         if blocked:
             LOGGER.warning("[%s] [Stage 11/16] Safety middleware enforced: %s", request_id, safety_reason)
-        validation = validate_email_response(safe_reply, kb_context, intent, emotion)
+        validation = validate_email_response(
+            safe_reply,
+            kb_context,
+            intent,
+            emotion,
+            guard_classification=guard_result.classification.value,
+        )
         LOGGER.info(
             "[%s] [Stage 11/16] Response validation grounded=%s valid=%s | Issues=%s",
             request_id,
@@ -266,7 +316,7 @@ def handle_customer_email(
             customer_risk_level=customer_memory.risk_level,
             customer_memory=customer_memory,
         )
-        calculated_conf = _calculate_confidence(kb_context, reply_memory, safe_reply)
+        calculated_conf = _calculate_confidence(kb_context, reply_memory, safe_reply, is_conversational=(is_conversational or is_guard_deflected))
         decision_label = decision.get("decision", "HUMAN_REVIEW")
         LOGGER.info(
             "[%s] [Stage 12/16] Email decision: %s | CustomerRisk=%s | IntentConf=%.2f | Reason: %s",
@@ -371,6 +421,7 @@ def handle_customer_email(
 
         return {
             "status": status,
+            "decision": decision_label,
             "reply": safe_reply,
             "confidence": f"{calculated_conf:.2f}",
             "intent": intent,

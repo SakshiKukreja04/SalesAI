@@ -27,6 +27,39 @@ LOGGER.info("Using ONNX embedding model: all-MiniLM-L6-v2 via DefaultEmbeddingFu
 
 _REFUND_FILENAMES = {"refund", "refund_policy", "returns", "return_policy"}
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)
+_MARKDOWN_HEADER_RE = re.compile(r"\n(?=##\s+)")
+
+EXCLUDED_FROM_VECTOR_STORE = {
+    "ai_response_guidelines",
+    "customer_support",
+}
+
+
+def _extract_section_title(chunk: str) -> str:
+    """Extract the ## heading from a markdown section chunk."""
+    first_line = chunk.split("\n")[0].strip()
+    if first_line.startswith("#"):
+        return re.sub(r"^#+\s*", "", first_line).strip()
+    return ""
+
+
+def _chunk_by_markdown_headers(text: str) -> List[str]:
+    """Split markdown into per-section chunks at ## headings."""
+    stripped = (text or "").strip()
+    if not stripped or not re.search(r"(?:^|\n)##\s+", stripped):
+        return []
+
+    sections = _MARKDOWN_HEADER_RE.split(stripped)
+    chunks: List[str] = []
+    for s in sections:
+        sec = s.strip()
+        sec = re.sub(r"\n---+\s*$", "", sec).strip()
+        if not sec:
+            continue
+        if not sec.startswith("##") and len(sec) < 120 and sec.startswith("#"):
+            continue
+        chunks.append(sec)
+    return chunks
 
 
 def _estimate_tokens(text: str) -> int:
@@ -116,12 +149,28 @@ def _document_version(file_path: Path) -> str:
 
 
 def _chunk_document(file_path: Path, raw_text: str) -> List[str]:
-    """Apply topic-aware chunking for a knowledge document."""
-    if file_path.stem.lower() in _REFUND_FILENAMES:
-        # Keep refund policy in one semantic block so critical timelines stay together.
-        as_one = (raw_text or "").strip()
-        return [as_one] if as_one else []
-    return _semantic_chunk_text(raw_text, min_tokens=200, max_tokens=500)
+    """Apply topic-aware chunking for a knowledge document.
+    
+    Splits multi-section markdown files by ## headings so distinct policy sections
+    (e.g., refund timelines, COD refund procedure, return conditions) remain atomic.
+    Falls back to semantic paragraph chunking for unstructured files, and sub-chunks
+    oversized sections.
+    """
+    sections = _chunk_by_markdown_headers(raw_text)
+    if not sections:
+        return _semantic_chunk_text(raw_text, min_tokens=200, max_tokens=500)
+
+    final_chunks: List[str] = []
+    for section in sections:
+        if _estimate_tokens(section) > 500:
+            sub = _semantic_chunk_text(section, min_tokens=150, max_tokens=450)
+            if sub:
+                final_chunks.extend(sub)
+            else:
+                final_chunks.append(section)
+        else:
+            final_chunks.append(section)
+    return final_chunks
 
 
 def _chunk_text(text: str, max_chars: int = 800, overlap: int = 120) -> List[str]:
@@ -231,6 +280,19 @@ def refresh_knowledge_embeddings(folder_path: str) -> Dict[str, int]:
         if not file_path.is_file() or file_path.suffix.lower() not in {".txt", ".md"}:
             continue
 
+        if file_path.stem.lower() in EXCLUDED_FROM_VECTOR_STORE:
+            LOGGER.info("Skipping excluded meta-instruction file: %s", file_path.name)
+            try:
+                existing = collection.get(where={"source_file": file_path.name}, include=[])
+                existing_ids = existing.get("ids", []) if existing else []
+                if existing_ids:
+                    collection.delete(ids=existing_ids)
+                    total_deleted += len(existing_ids)
+                    LOGGER.info("Purged %d stale vectors for excluded file %s", len(existing_ids), file_path.name)
+            except Exception as exc:
+                LOGGER.warning("Failed to purge stale vectors for excluded file %s: %s", file_path.name, exc)
+            continue
+
         total_files += 1
         raw_text = file_path.read_text(encoding="utf-8")
         chunks = _chunk_document(file_path=file_path, raw_text=raw_text)
@@ -257,16 +319,18 @@ def refresh_knowledge_embeddings(folder_path: str) -> Dict[str, int]:
         for idx, chunk in enumerate(chunks):
             docs.append(chunk)
             ids.append(f"{file_path.stem}:{version}:{idx}")
-            metadatas.append(
-                {
-                    "source_file": file_path.name,
-                    "topic": topic,
-                    "version": version,
-                    "active": "true",
-                    "chunk_index": str(idx),
-                    "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-                }
-            )
+            sec_title = _extract_section_title(chunk)
+            chunk_metadata: Dict[str, str] = {
+                "source_file": file_path.name,
+                "topic": topic,
+                "version": version,
+                "active": "true",
+                "chunk_index": str(idx),
+                "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
+            }
+            if sec_title:
+                chunk_metadata["section_title"] = sec_title
+            metadatas.append(chunk_metadata)
 
         collection.upsert(documents=docs, ids=ids, metadatas=metadatas)
         total_chunks += len(docs)
@@ -278,6 +342,12 @@ def refresh_knowledge_embeddings(folder_path: str) -> Dict[str, int]:
             topic,
             len(docs),
         )
+
+    try:
+        from app.rag.retrieval import invalidate_bm25_index
+        invalidate_bm25_index()
+    except Exception:
+        pass
 
     return {"files": total_files, "chunks": total_chunks, "deleted": total_deleted}
 

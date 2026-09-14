@@ -24,8 +24,35 @@ def _contains_unsupported_claim(answer: str) -> bool:
     return any(re.search(pattern, text, re.IGNORECASE) for pattern in UNSUPPORTED_PATTERNS)
 
 
-def validate_email_response(answer: str, context_chunks: List[str], intent: str, emotion: str) -> Dict[str, Any]:
+CONVERSATIONAL_INTENTS = {"thanks", "greeting", "conversational", "acknowledgement"}
+GUARD_DEFLECTION_CLASSES = {"suspicious", "off_topic", "gibberish", "conversational"}
+
+
+def validate_email_response(
+    answer: str,
+    context_chunks: List[str],
+    intent: str,
+    emotion: str,
+    guard_classification: Optional[str] = None,
+) -> Dict[str, Any]:
     """Run the V3 validation step before any send decision."""
+    clean_intent = (intent or "").strip().lower()
+    clean_guard = (guard_classification or "").strip().lower()
+
+    if clean_guard in GUARD_DEFLECTION_CLASSES or clean_intent in CONVERSATIONAL_INTENTS:
+        issues: List[str] = []
+        if not answer or not answer.strip():
+            issues.append("empty_answer")
+        valid = len(issues) == 0
+        return {
+            "grounded": valid,
+            "valid": valid,
+            "confidence": 0.95 if valid else 0.40,
+            "issues": issues,
+            "intent": intent,
+            "emotion": emotion,
+        }
+
     validation = validate_response(answer=answer, context_chunks=context_chunks)
 
     issues: List[str] = []

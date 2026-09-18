@@ -149,6 +149,8 @@ class CustomerMemory:
     sentiment_trend: float = 0.0  # -1.0 (worsening) to +1.0 (improving)
     repeat_issue_detected: bool = False
     repeat_issue_intent: Optional[str] = None
+    graph_context: Optional[Dict[str, Any]] = None
+    graph_context_text: str = ""
     is_empty: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -164,6 +166,8 @@ class CustomerMemory:
             "sentiment_trend": self.sentiment_trend,
             "repeat_issue_detected": self.repeat_issue_detected,
             "repeat_issue_intent": self.repeat_issue_intent,
+            "graph_context": self.graph_context,
+            "graph_context_text": self.graph_context_text,
             "is_empty": self.is_empty,
         }
 
@@ -196,6 +200,7 @@ class FormattedMemoryContext:
     """Compact prompt-ready memory context adhering to memory budget."""
 
     profile_text: str = ""
+    graph_context_text: str = ""
     recent_history_text: str = ""
     open_issues_text: str = ""
     product_interests_text: str = ""

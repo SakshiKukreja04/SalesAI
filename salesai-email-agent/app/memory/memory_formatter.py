@@ -13,11 +13,12 @@ from app.memory.memory_models import CustomerMemory, FormattedMemoryContext
 LOGGER = logging.getLogger(__name__)
 
 # Maximum character limits for context sections to prevent prompt bloating
+MAX_GRAPH_CHARS = 800
 MAX_ISSUES_CHARS = 400
 MAX_HISTORY_CHARS = 700
 MAX_INTERESTS_CHARS = 200
 MAX_SEMANTIC_CHARS = 400
-MAX_TOTAL_MEMORY_CHARS = 1600
+MAX_TOTAL_MEMORY_CHARS = 2400
 
 
 def format_customer_memory(
@@ -28,35 +29,51 @@ def format_customer_memory(
     """Format CustomerMemory into structured, prioritized text sections.
     
     Priority Order:
-    1. Open issues
-    2. Recent conversations (intent-relevant first)
-    3. Relevant previous interactions
-    4. Product interests
-    5. Older history / patterns
+    1. Customer Profile
+    2. Neo4j Graph Business Context (Orders, Shipments, Products)
+    3. Open issues
+    4. Recent conversations (intent-relevant first)
+    5. Relevant previous interactions
+    6. Product interests
+    7. Older history / patterns
     """
-    if memory.is_empty or not memory.profile:
+    graph_text = (getattr(memory, "graph_context_text", "") or "").strip()
+    if not graph_text and getattr(memory, "graph_context", None):
+        try:
+            from app.neo4j_retrieval import format_graph_context
+            graph_text = format_graph_context(memory.graph_context).strip()
+        except Exception:
+            graph_text = ""
+
+    if (memory.is_empty or not memory.profile) and not graph_text:
         return FormattedMemoryContext(full_context_text="[NEW CUSTOMER - No prior history]")
 
     seen_texts: Set[str] = set()
 
     # 1. Profile block
-    prof = memory.profile
-    profile_lines = [
-        f"- Customer ID: {prof.customer_id}",
-        f"- Total Interactions: {prof.total_interactions}",
-    ]
-    if prof.name and prof.name != "Valued Customer":
-        profile_lines.append(f"- Name: {prof.name}")
-    if prof.first_contact_at:
-        profile_lines.append(f"- First Contact: {prof.first_contact_at.strftime('%Y-%m-%d')}")
-    if memory.risk_level != "LOW":
-        profile_lines.append(f"- Customer Risk Level: {memory.risk_level}")
-    if memory.repeat_issue_detected:
-        profile_lines.append(f"- Note: Repeat inquiry on '{memory.repeat_issue_intent or current_intent}'")
+    profile_text = ""
+    if memory.profile:
+        prof = memory.profile
+        profile_lines = [
+            f"- Customer ID: {prof.customer_id}",
+            f"- Total Interactions: {prof.total_interactions}",
+        ]
+        if prof.name and prof.name != "Valued Customer":
+            profile_lines.append(f"- Name: {prof.name}")
+        if prof.first_contact_at:
+            profile_lines.append(f"- First Contact: {prof.first_contact_at.strftime('%Y-%m-%d')}")
+        if memory.risk_level != "LOW":
+            profile_lines.append(f"- Customer Risk Level: {memory.risk_level}")
+        if memory.repeat_issue_detected:
+            profile_lines.append(f"- Note: Repeat inquiry on '{memory.repeat_issue_intent or current_intent}'")
 
-    profile_text = "CUSTOMER PROFILE:\n" + "\n".join(profile_lines)
+        profile_text = "CUSTOMER PROFILE:\n" + "\n".join(profile_lines)
 
-    # 2. Open Issues (Priority 1)
+    # 2. Graph context (Order/Shipment facts from Neo4j)
+    if graph_text and len(graph_text) > MAX_GRAPH_CHARS:
+        graph_text = graph_text[:MAX_GRAPH_CHARS] + "..."
+
+    # 3. Open Issues (Priority 1)
     open_issue_lines = []
     if memory.open_issues:
         for issue in memory.open_issues[:3]:
@@ -86,7 +103,7 @@ def format_customer_memory(
             joined_issues = joined_issues[:MAX_ISSUES_CHARS] + "..."
         issues_text = "OPEN / RECENT ISSUES:\n" + joined_issues
 
-    # 3. Recent Conversations (Priority 2, prioritized by intent relevance)
+    # 4. Recent Conversations (Priority 2, prioritized by intent relevance)
     history_lines = []
     if memory.recent_conversations:
         # Separate intent-matching conversations to put them first
@@ -127,7 +144,7 @@ def format_customer_memory(
             joined_history = joined_history[:MAX_HISTORY_CHARS] + "..."
         history_text = "RECENT CONVERSATION HISTORY:\n" + joined_history
 
-    # 4. Product Interests (Priority 4)
+    # 5. Product Interests (Priority 4)
     interest_lines = []
     if memory.interests:
         for item in memory.interests[:4]:
@@ -140,13 +157,13 @@ def format_customer_memory(
             joined_interests = joined_interests[:MAX_INTERESTS_CHARS] + "..."
         interests_text = "PRODUCT INTERESTS:\n" + joined_interests
 
-    # 5. Semantic Past Interactions (Priority 3 - deduplicated)
+    # 6. Semantic Past Interactions (Priority 3 - deduplicated)
     semantic_lines = []
     if memory.relevant_interactions:
         for inter in memory.relevant_interactions:
             msg = inter.get("message", "").strip()
             if msg and msg[:30].lower() not in seen_texts:
-                intent_tag = f" (Intent: {inter.get('intent')})" if inter.get("intent") else ""
+                intent_tag = f" (Intent: {inter.get('intent')})" if inter.get('intent') else ""
                 semantic_lines.append(f"- Past Query{intent_tag}: \"{msg[:100]}\"")
                 seen_texts.add(msg[:30].lower())
 
@@ -157,7 +174,7 @@ def format_customer_memory(
             joined_semantic = joined_semantic[:MAX_SEMANTIC_CHARS] + "..."
         semantic_text = "RELEVANT PREVIOUS INTERACTIONS:\n" + joined_semantic
 
-    # 6. Previous AI Reply Patterns (if relevant and not duplicated)
+    # 7. Previous AI Reply Patterns (if relevant and not duplicated)
     reply_pattern_lines = []
     if memory.previous_replies:
         for rep in memory.previous_replies[:2]:
@@ -170,16 +187,17 @@ def format_customer_memory(
         reply_patterns_text = "PREVIOUS RESPONSE PATTERNS:\n" + "\n".join(reply_pattern_lines)
 
     # Assemble full context respecting max memory budget
-    sections = [s for s in [profile_text, issues_text, history_text, interests_text, semantic_text, reply_patterns_text] if s]
+    sections = [s for s in [profile_text, graph_text, issues_text, history_text, interests_text, semantic_text, reply_patterns_text] if s]
     full_context = "\n\n".join(sections)
     
     if len(full_context) > MAX_TOTAL_MEMORY_CHARS:
-        # Fallback to essential sections (Profile + Issues + History)
-        essential = [s for s in [profile_text, issues_text, history_text] if s]
+        # Fallback to essential sections (Profile + Graph + Issues + History)
+        essential = [s for s in [profile_text, graph_text, issues_text, history_text] if s]
         full_context = "\n\n".join(essential)
 
     return FormattedMemoryContext(
         profile_text=profile_text,
+        graph_context_text=graph_text,
         recent_history_text=history_text,
         open_issues_text=issues_text,
         product_interests_text=interests_text,

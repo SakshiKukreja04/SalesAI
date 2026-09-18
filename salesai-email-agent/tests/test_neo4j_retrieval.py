@@ -56,6 +56,42 @@ class Neo4jRetrievalTest(unittest.TestCase):
         self.assertIn("shipped at=2026-09-02", formatted)
         self.assertIn("tracking=TRK-1", formatted)
 
+    def test_search_products_graph(self):
+        sample_prod = [{
+            "name": "AirBeat Pro Earbuds",
+            "sku": "ELX-001",
+            "brand": "ShopiFyX",
+            "category": "Electronics",
+            "price": 3999.0,
+            "availability": "in_stock",
+            "rating": 4.6,
+            "description": "True wireless earbuds",
+        }]
+        from app.neo4j_retrieval import search_products_graph
+        with patch("app.neo4j_retrieval.neo4j_client") as client:
+            client.configured = True
+            client.read_records.return_value = sample_prod
+
+            res = search_products_graph("AirBeat")
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["sku"], "ELX-001")
+
+    def test_format_graph_context_with_matching_products(self):
+        context = {
+            "customer_found": False,
+            "matching_products": [{
+                "name": "KitchenPro Air Fryer 4L",
+                "sku": "HK-001",
+                "category": "Home & Kitchen",
+                "price": 4999.0,
+                "availability": "in_stock",
+            }],
+        }
+        formatted = format_graph_context(context)
+        self.assertIn("KitchenPro Air Fryer 4L", formatted)
+        self.assertIn("HK-001", formatted)
+        self.assertIn("Home & Kitchen", formatted)
+
 
 if __name__ == "__main__":
     unittest.main()

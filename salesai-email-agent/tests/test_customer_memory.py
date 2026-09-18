@@ -164,17 +164,18 @@ class TestCustomerMemoryV3(unittest.TestCase):
         self.assertEqual(interests[1].product_name, "Trail Running Shoes")
 
     # 7. Similar interaction retrieval
-    @patch("app.rag.chroma_store.ensure_user_collection")
-    def test_similar_interaction_retrieval(self, mock_ensure_col):
+    def test_similar_interaction_retrieval(self):
+        mock_chroma_mod = MagicMock()
         mock_col = MagicMock()
         mock_col.query.return_value = {
             "documents": [["I received a damaged jacket last month."]],
             "metadatas": [[{"intent": "damaged_product", "emotion": "disappointed", "timestamp": "2026-08-01"}]],
         }
-        mock_ensure_col.return_value = mock_col
+        mock_chroma_mod.ensure_user_collection.return_value = mock_col
 
-        from app.memory.memory_retriever import _retrieve_semantic_interactions
-        interactions = _retrieve_semantic_interactions("customer@example.com", "jacket problem", k=2)
+        with patch.dict("sys.modules", {"app.rag.chroma_store": mock_chroma_mod}):
+            from app.memory.memory_retriever import _retrieve_semantic_interactions
+            interactions = _retrieve_semantic_interactions("customer@example.com", "jacket problem", k=2)
 
         self.assertEqual(len(interactions), 1)
         self.assertEqual(interactions[0]["intent"], "damaged_product")

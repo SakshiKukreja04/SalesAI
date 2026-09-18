@@ -79,9 +79,16 @@ def _detect_repeat_issues(
     if not clean_intent:
         return False, None
 
-    # Check against open issues
+    # Check against open issues (allow matching with underscores or spaces)
+    intent_phrase = clean_intent.replace("_", " ")
     for issue in open_issues:
-        if clean_intent in issue.issue_title.lower() or issue.issue_title.lower() in clean_intent:
+        issue_title_lower = issue.issue_title.lower()
+        if (
+            clean_intent in issue_title_lower
+            or intent_phrase in issue_title_lower
+            or issue_title_lower in clean_intent
+            or issue_title_lower in intent_phrase
+        ):
             return True, issue.issue_title
 
     # Check if the intent occurred >= 2 times in recent turns
@@ -227,17 +234,28 @@ def retrieve_customer_memory(
         semantic_interactions = _retrieve_semantic_interactions(customer_email, query_text, k=2)
         previous_replies = _retrieve_relevant_previous_replies(customer_email, query_text, k=2)
 
+        # 5b. Neo4j graph business context (orders, shipments, products, graph conversations/issues)
+        graph_context = None
+        graph_context_text = ""
+        try:
+            from app.neo4j_retrieval import get_salesai_context, format_graph_context
+            graph_context = get_salesai_context(customer_email, intent=intent, query_text=query_text)
+            if graph_context:
+                graph_context_text = format_graph_context(graph_context)
+        except Exception as exc:
+            LOGGER.debug("Neo4j context retrieval skipped or failed: %s", exc)
+
         # 6. Trend & Risk calculations
         sentiment_trend = _calculate_sentiment_trend(recent_conversations)
         repeat_detected, repeat_intent = _detect_repeat_issues(intent, open_issues, recent_conversations)
         risk_level = _calculate_risk_level(open_issues, recent_conversations, sentiment_trend, emotion, repeat_detected)
 
         is_empty = (
-            not profile
-            and not recent_conversations
+            not recent_conversations
             and not open_issues
             and not interests
             and not semantic_interactions
+            and not graph_context_text
         )
 
         memory = CustomerMemory(
@@ -252,17 +270,20 @@ def retrieve_customer_memory(
             sentiment_trend=sentiment_trend,
             repeat_issue_detected=repeat_detected,
             repeat_issue_intent=repeat_intent,
+            graph_context=graph_context,
+            graph_context_text=graph_context_text,
             is_empty=is_empty,
         )
 
         duration_ms = (time.time() - start_time) * 1000
         LOGGER.info(
-            "Customer memory retrieved in %.1fms | email=%s | conversations=%d | open_issues=%d | interests=%d | risk=%s",
+            "Customer memory retrieved in %.1fms | email=%s | conversations=%d | open_issues=%d | interests=%d | graph=%s | risk=%s",
             duration_ms,
             customer_email,
             len(recent_conversations),
             len(open_issues),
             len(interests),
+            bool(graph_context_text),
             risk_level,
         )
         return memory

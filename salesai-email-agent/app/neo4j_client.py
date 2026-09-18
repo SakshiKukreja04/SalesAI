@@ -41,9 +41,11 @@ class Neo4jClient:
         self._driver = GraphDatabase.driver(
             self.uri,
             auth=(self.username, self.password),
-            connection_timeout=15.0,
-            max_connection_lifetime=300.0,
-            max_transaction_retry_time=15.0,
+            connection_timeout=5.0,
+            max_connection_lifetime=120.0,
+            max_transaction_retry_time=5.0,
+            liveness_check_timeout=2.0,
+            keep_alive=True,
         )
 
     @property
@@ -66,7 +68,9 @@ class Neo4jClient:
         """Create a database-scoped session for callers that need one."""
         if not self._driver:
             raise RuntimeError("Neo4j is not configured")
-        return self._driver.session(database=self.database)
+        if self.database and self.database not in {"neo4j", "default"}:
+            return self._driver.session(database=self.database)
+        return self._driver.session()
 
     def read_records(self, query: str, **params: Any) -> list[dict[str, Any]]:
         """Run a read query and recreate a defunct driver once if needed."""

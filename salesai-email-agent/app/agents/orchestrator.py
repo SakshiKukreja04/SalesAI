@@ -44,8 +44,18 @@ def _generate_validated_reply(
     reply_memory: Optional[List[str]] = None,
     customer_name: str = "",
 ) -> tuple[str, str]:
-    """Generate and double-validate a fact-grounded response with customer memory."""
-    strict_prompt = build_strict_context_prompt(user_query=current_message, retrieved_chunks=kb_context)
+    # Build prompt chunks including internal KB policy chunks and Graph / Customer Memory facts
+    prompt_chunks = list(kb_context)
+    if customer_memory:
+        graph_text = (getattr(customer_memory, "graph_context_text", "") or "").strip()
+        if graph_text:
+            prompt_chunks.append(graph_text)
+        from app.memory.memory_formatter import format_customer_memory
+        formatted_mem = format_customer_memory(customer_memory, current_intent=intent, current_message=current_message)
+        if formatted_mem and formatted_mem.full_context_text:
+            prompt_chunks.append(formatted_mem.full_context_text)
+
+    strict_prompt = build_strict_context_prompt(user_query=current_message, retrieved_chunks=prompt_chunks)
 
     reply = generate_reply(
         current_message=current_message,
@@ -58,14 +68,26 @@ def _generate_validated_reply(
         strict_prompt=strict_prompt,
     )
     cleaned = normalize_customer_response(reply, customer_name=customer_name)
-    validation = validate_response(answer=cleaned, context_chunks=kb_context)
+
+    # Validation contexts must include both internal KB policy chunks and Graph / Customer Memory facts
+    validation_contexts = list(kb_context)
+    if customer_memory:
+        graph_text = (getattr(customer_memory, "graph_context_text", "") or "").strip()
+        if graph_text:
+            validation_contexts.append(graph_text)
+        from app.memory.memory_formatter import format_customer_memory
+        formatted_mem = format_customer_memory(customer_memory, current_intent=intent, current_message=current_message)
+        if formatted_mem and formatted_mem.full_context_text:
+            validation_contexts.append(formatted_mem.full_context_text)
+
+    validation = validate_response(answer=cleaned, context_chunks=validation_contexts)
     if validation.is_valid:
         return cleaned, "validated"
 
     # Retry generation with explicit factual grounding reinforcement
     retry_prompt = (
         strict_prompt
-        + "\n\nIMPORTANT: The previous answer failed factual or formatting validation. Output pure plain text, strictly following internal policy facts with no markdown formatting."
+        + "\n\nIMPORTANT: The previous answer failed factual or formatting validation. Output pure plain text, strictly following internal policy and graph context facts with no markdown formatting."
     )
     retry_reply = generate_reply(
         current_message=current_message,
@@ -78,7 +100,7 @@ def _generate_validated_reply(
         strict_prompt=retry_prompt,
     )
     retry_clean = normalize_customer_response(retry_reply, customer_name=customer_name)
-    retry_validation = validate_response(answer=retry_clean, context_chunks=kb_context)
+    retry_validation = validate_response(answer=retry_clean, context_chunks=validation_contexts)
     if retry_validation.is_valid:
         return retry_clean, "validated_retry"
     return normalize_customer_response(SAFE_FALLBACK_RESPONSE, customer_name=customer_name), "fallback"
@@ -281,16 +303,26 @@ def handle_customer_email(
             LOGGER.debug("[%s] [Stage 10/16] Draft Reply Content:\n%s", request_id, generated_reply)
 
         # Step 11: Validate response & Safety middleware
+        validation_contexts = list(kb_context)
+        if customer_memory:
+            graph_text = (getattr(customer_memory, "graph_context_text", "") or "").strip()
+            if graph_text:
+                validation_contexts.append(graph_text)
+            from app.memory.memory_formatter import format_customer_memory
+            formatted_mem = format_customer_memory(customer_memory, current_intent=intent, current_message=normalized_text)
+            if formatted_mem and formatted_mem.full_context_text:
+                validation_contexts.append(formatted_mem.full_context_text)
+
         safe_reply, blocked, safety_reason = enforce_email_safety(
             answer=generated_reply,
-            retrieved_context_chunks=kb_context,
+            retrieved_context_chunks=validation_contexts,
             is_conversational_or_guarded=(is_conversational or is_guard_deflected),
         )
         if blocked:
             LOGGER.warning("[%s] [Stage 11/16] Safety middleware enforced: %s", request_id, safety_reason)
         validation = validate_email_response(
             safe_reply,
-            kb_context,
+            validation_contexts,
             intent,
             emotion,
             guard_classification=guard_result.classification.value,
@@ -520,10 +552,20 @@ def process_email(
             )
 
         # Step 11: Validation & Safety
-        safe_reply, blocked, safety_reason = enforce_email_safety(answer=generated_reply, retrieved_context_chunks=kb_context)
+        proc_validation_contexts = list(kb_context)
+        if customer_memory:
+            graph_text = (getattr(customer_memory, "graph_context_text", "") or "").strip()
+            if graph_text:
+                proc_validation_contexts.append(graph_text)
+            from app.memory.memory_formatter import format_customer_memory
+            formatted_mem = format_customer_memory(customer_memory, current_intent=intent, current_message=normalized_text)
+            if formatted_mem and formatted_mem.full_context_text:
+                proc_validation_contexts.append(formatted_mem.full_context_text)
+
+        safe_reply, blocked, safety_reason = enforce_email_safety(answer=generated_reply, retrieved_context_chunks=proc_validation_contexts)
         if blocked:
             LOGGER.warning("process_email safety middleware replaced reply: %s", safety_reason)
-        validation = validate_email_response(safe_reply, kb_context, intent, emotion)
+        validation = validate_email_response(safe_reply, proc_validation_contexts, intent, emotion)
 
         # Step 12: Decision
         decision = decide_email_action(

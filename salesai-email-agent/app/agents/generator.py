@@ -420,6 +420,7 @@ def generate_reply_structured(
     customer_memory: Optional[Any] = None,
     reply_memory: Optional[List[str]] = None,
     strict_prompt: Optional[str] = None,
+    customer_name: str = "",
 ) -> Dict[str, Any]:
     """Generate structured response JSON matching the V3 system contract."""
     chunks = kb_context or []
@@ -447,8 +448,8 @@ def generate_reply_structured(
         strategy=strategy,
     )
 
-    cust_name = ""
-    if customer_memory is not None:
+    cust_name = customer_name or ""
+    if not cust_name and customer_memory is not None:
         prof = getattr(customer_memory, "profile", None)
         if prof and getattr(prof, "name", None):
             cust_name = prof.name or ""
@@ -512,6 +513,7 @@ def generate_reply(
     intent_confidence: Optional[float] = None,
     emotion_intensity: Optional[float] = None,
     customer_memory_context: str = "",
+    customer_name: str = "",
 ) -> str:
     """Generate a policy-grounded reply string, matching all caller contracts."""
     msg = current_message or customer_text
@@ -531,5 +533,6 @@ def generate_reply(
         customer_memory=customer_memory,
         reply_memory=replies,
         strict_prompt=strict_prompt,
+        customer_name=customer_name,
     )
     return structured["reply"]

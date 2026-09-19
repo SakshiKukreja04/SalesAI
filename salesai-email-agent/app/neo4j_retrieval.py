@@ -25,8 +25,6 @@ def get_customer_context(email: str) -> Dict[str, Any]:
     query = """
     MATCH (c:Customer)
     WHERE toLower(coalesce(c.contact_email, c.email, '')) = $email
-       OR toLower(coalesce(c.contact_email, c.email, '')) CONTAINS $email
-       OR $email CONTAINS toLower(coalesce(c.contact_email, c.email, ''))
     OPTIONAL MATCH (c)-[:PLACED]->(o:Order)
     OPTIONAL MATCH (o)-[contains:CONTAINS]->(p:Product)
     OPTIONAL MATCH (o)-[:HAS_SHIPMENT]->(s:Shipment)
@@ -106,8 +104,6 @@ def get_customer_conversations(email: str, limit: int = 10) -> List[Dict[str, An
     query = """
     MATCH (c:Customer)-[:HAD_CONVERSATION]->(conversation:Conversation)
     WHERE toLower(coalesce(c.contact_email, c.email, '')) = $email
-       OR toLower(coalesce(c.contact_email, c.email, '')) CONTAINS $email
-       OR $email CONTAINS toLower(coalesce(c.contact_email, c.email, ''))
     RETURN conversation.id AS id,
            conversation.subject AS subject,
            conversation.customer_message AS customer_message,
@@ -128,8 +124,6 @@ def get_customer_issues(email: str, limit: int = 10) -> List[Dict[str, Any]]:
     query = """
     MATCH (c:Customer)-[:HAS_ISSUE]->(issue:Issue)
     WHERE toLower(coalesce(c.contact_email, c.email, '')) = $email
-       OR toLower(coalesce(c.contact_email, c.email, '')) CONTAINS $email
-       OR $email CONTAINS toLower(coalesce(c.contact_email, c.email, ''))
     RETURN issue.id AS id,
            issue.issue_title AS title,
            issue.issue_description AS description,
@@ -146,8 +140,6 @@ def get_customer_interests(email: str, limit: int = 10) -> List[Dict[str, Any]]:
     query = """
     MATCH (c:Customer)-[:HAS_INTEREST]->(p:Product)
     WHERE toLower(coalesce(c.contact_email, c.email, '')) = $email
-       OR toLower(coalesce(c.contact_email, c.email, '')) CONTAINS $email
-       OR $email CONTAINS toLower(coalesce(c.contact_email, c.email, ''))
     OPTIONAL MATCH (p)-[:BELONGS_TO]->(category:Category)
     RETURN p.name AS name,
            p.sku AS sku,

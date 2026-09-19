@@ -66,6 +66,7 @@ def _generate_validated_reply(
         customer_memory=customer_memory,
         reply_memory=reply_memory,
         strict_prompt=strict_prompt,
+        customer_name=customer_name,
     )
     cleaned = normalize_customer_response(reply, customer_name=customer_name)
 
@@ -98,6 +99,7 @@ def _generate_validated_reply(
         customer_memory=customer_memory,
         reply_memory=reply_memory,
         strict_prompt=retry_prompt,
+        customer_name=customer_name,
     )
     retry_clean = normalize_customer_response(retry_reply, customer_name=customer_name)
     retry_validation = validate_response(answer=retry_clean, context_chunks=validation_contexts)

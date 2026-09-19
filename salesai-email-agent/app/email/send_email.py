@@ -16,10 +16,14 @@ from typing import Optional
 from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-# pyrefly: ignore [missing-import]
-from googleapiclient.discovery import build
-# pyrefly: ignore [missing-import]
-from googleapiclient.errors import HttpError
+try:
+    # pyrefly: ignore [missing-import]
+    from googleapiclient.discovery import build
+    # pyrefly: ignore [missing-import]
+    from googleapiclient.errors import HttpError
+except ImportError:
+    build = None
+    HttpError = Exception
 
 from app.config import settings
 

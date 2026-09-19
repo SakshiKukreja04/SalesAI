@@ -119,15 +119,33 @@ def _is_sentence_grounded(sentence: str, context_chunks: List[str]) -> bool:
     return False
 
 
+def _normalize_timeline_text(text: str) -> str:
+    """Normalize timeline expressions (e.g., '3-5 business days' -> '3 to 5 business days')."""
+    if not text:
+        return ""
+    t = text.lower()
+    t = re.sub(r"(\d+)\s*[-–—]\s*(\d+)", r"\1 to \2", t)
+    t = re.sub(r"\s+", " ", t)
+    return t
+
+
 def _has_fact_mismatch(answer: str, context_text: str) -> bool:
     answer_facts = [m.group(0).lower() for m in _FACT_RE.finditer(answer or "")]
     if not answer_facts:
         return False
 
     context_lower = (context_text or "").lower()
+    context_norm = _normalize_timeline_text(context_lower)
+
     for fact in answer_facts:
-        if fact not in context_lower:
-            return True
+        fact_norm = _normalize_timeline_text(fact)
+        if fact in context_lower or fact_norm in context_norm:
+            continue
+        fact_without_business = fact_norm.replace("business ", "")
+        context_without_business = context_norm.replace("business ", "")
+        if fact_without_business in context_without_business:
+            continue
+        return True
     return False
 
 

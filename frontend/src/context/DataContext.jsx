@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useMemo, useState } from 'react'
 import toast from 'react-hot-toast'
 
-import { fetchAnalytics, fetchEmails } from '../services/api'
+import { fetchAnalytics, fetchCustomerIssues, fetchEmails } from '../services/api'
 import { useAuth } from './AuthContext'
 
 const DataContext = createContext(null)
@@ -11,8 +11,10 @@ const normalizeIntent = (value) => (value || '').trim()
 export function DataProvider({ children }) {
   const { profile, isAdmin } = useAuth()
   const [emails, setEmails] = useState([])
+  const [issues, setIssues] = useState([])
   const [analytics, setAnalytics] = useState(null)
   const [loadingEmails, setLoadingEmails] = useState(false)
+  const [loadingIssues, setLoadingIssues] = useState(false)
 
   const visibleEmails = useMemo(() => {
     if (isAdmin) {
@@ -35,6 +37,19 @@ export function DataProvider({ children }) {
     }
   }, [isAdmin, profile.assignedIntents])
 
+  const refreshIssues = useCallback(async (status = '') => {
+    setLoadingIssues(true)
+    try {
+      const data = await fetchCustomerIssues({ status })
+      setIssues(Array.isArray(data) ? data : [])
+    } catch (error) {
+      // Non-blocking toast
+      console.warn('Unable to load issues from API', error)
+    } finally {
+      setLoadingIssues(false)
+    }
+  }, [])
+
   const refreshAnalytics = useCallback(async () => {
     try {
       const data = await fetchAnalytics()
@@ -48,12 +63,15 @@ export function DataProvider({ children }) {
     () => ({
       emails,
       visibleEmails,
+      issues,
+      loadingIssues,
       analytics,
       loadingEmails,
       refreshEmails,
+      refreshIssues,
       refreshAnalytics,
     }),
-    [emails, visibleEmails, analytics, loadingEmails, refreshEmails, refreshAnalytics],
+    [emails, visibleEmails, issues, loadingIssues, analytics, loadingEmails, refreshEmails, refreshIssues, refreshAnalytics],
   )
 
   return <DataContext.Provider value={value}>{children}</DataContext.Provider>

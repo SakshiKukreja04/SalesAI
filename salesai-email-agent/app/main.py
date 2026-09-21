@@ -178,6 +178,11 @@ def process_email_endpoint(payload: EmailRequest) -> Dict[str, str]:
     return normalized
 
 
+class UpdateIssueRequest(BaseModel):
+    status: str
+    resolution_notes: str = ""
+
+
 @app.get("/api/emails")
 def get_emails(limit: int = 100) -> Dict[str, Any]:
     """Fetch recent email records for admin dashboard.
@@ -193,6 +198,57 @@ def get_emails(limit: int = 100) -> Dict[str, Any]:
         "total": len(records),
         "emails": records
     }
+
+
+@app.get("/api/issues")
+def get_issues(status: str = Query(default="", description="Filter by status: open, options_presented, refund_initiated, exchange_pending, resolved"), limit: int = 100) -> Dict[str, Any]:
+    """Fetch tracked customer disputes, defect triage results, and resolution actions."""
+    from app.db.customer_memory import get_all_customer_issues
+    clean_status = status.strip() if status else None
+    issues = get_all_customer_issues(status=clean_status, limit=limit)
+    return {
+        "total": len(issues),
+        "issues": issues,
+    }
+
+
+@app.patch("/api/issues/{issue_id}")
+def update_issue_endpoint(issue_id: str, payload: UpdateIssueRequest) -> Dict[str, Any]:
+    """Admin update for issue status and resolution notes."""
+    from app.db.customer_memory import update_issue_status_by_id
+    success = update_issue_status_by_id(
+        issue_id=issue_id,
+        status=payload.status,
+        resolution_notes=payload.resolution_notes,
+    )
+    if not success:
+        raise HTTPException(status_code=404, detail="Issue not found or could not be updated")
+    return {"status": "success", "issue_id": issue_id, "new_status": payload.status}
+
+
+@app.post("/api/action/refund")
+def trigger_refund_endpoint(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Trigger automated or manual refund action."""
+    from app.tools.inventory_tool import execute_refund_action
+    order_num = payload.get("order_number") or "ORD-CURRENT"
+    email = payload.get("customer_email") or ""
+    cid = payload.get("customer_id") or ""
+    reason = payload.get("reason") or "Manual Admin / Multi-modal Action Trigger"
+    res = execute_refund_action(order_number=order_num, customer_email=email, customer_id=cid, reason=reason)
+    return res
+
+
+@app.post("/api/action/exchange")
+def trigger_exchange_endpoint(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Trigger automated or manual replacement exchange action."""
+    from app.tools.inventory_tool import execute_exchange_action
+    order_num = payload.get("order_number") or "ORD-CURRENT"
+    email = payload.get("customer_email") or ""
+    sku = payload.get("sku") or "FW-009"
+    rep_sku = payload.get("replacement_sku") or sku
+    cid = payload.get("customer_id") or ""
+    res = execute_exchange_action(order_number=order_num, customer_email=email, sku=sku, replacement_sku=rep_sku, customer_id=cid)
+    return res
 
 
 @app.post("/api/create-user")

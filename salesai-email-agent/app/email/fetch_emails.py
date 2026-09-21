@@ -196,13 +196,112 @@ def get_gmail_service() -> Optional[Any]:
         return None
 
 
-def fetch_unread_emails(max_results: int = 20) -> List[Dict[str, str]]:
+def _collect_attachment_parts(parts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Recursively discover attachment parts from MIME payload."""
+    attachments: List[Dict[str, Any]] = []
+    for part in parts:
+        filename = part.get("filename", "")
+        mime_type = (part.get("mimeType", "") or "").lower()
+        body = part.get("body", {})
+        attachment_id = body.get("attachmentId")
+        data = body.get("data")
+        size = body.get("size", 0)
+
+        # Look for images or named attachments
+        if (filename or mime_type.startswith("image/")) and (attachment_id or data):
+            attachments.append({
+                "filename": filename or "attachment.jpg",
+                "mime_type": mime_type or "image/jpeg",
+                "attachment_id": attachment_id,
+                "data": data,
+                "size_bytes": size,
+            })
+
+        child_parts = part.get("parts", [])
+        if child_parts:
+            attachments.extend(_collect_attachment_parts(child_parts))
+    return attachments
+
+
+def extract_attachments(
+    service: Optional[Any],
+    message_id: str,
+    payload: Dict[str, Any],
+    max_attachments: int = 3,
+    max_total_bytes: int = 5 * 1024 * 1024,
+) -> List[Dict[str, Any]]:
+    """Extract and download image attachments from email payload."""
+    if not payload:
+        return []
+
+    parts = payload.get("parts", [])
+    raw_attachments = _collect_attachment_parts(parts)
+    if not raw_attachments:
+        mime = (payload.get("mimeType", "") or "").lower()
+        fn = payload.get("filename", "")
+        b = payload.get("body", {})
+        if (fn or mime.startswith("image/")) and (b.get("attachmentId") or b.get("data")):
+            raw_attachments.append({
+                "filename": fn or "attachment.jpg",
+                "mime_type": mime or "image/jpeg",
+                "attachment_id": b.get("attachmentId"),
+                "data": b.get("data"),
+                "size_bytes": b.get("size", 0),
+            })
+
+    image_attachments = [
+        att for att in raw_attachments
+        if att.get("mime_type", "").startswith("image/")
+        or any(att.get("filename", "").lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".webp", ".heic", ".bmp"])
+    ][:max_attachments]
+
+    downloaded = []
+    total_bytes = 0
+
+    for att in image_attachments:
+        b64_data = att.get("data")
+        att_id = att.get("attachment_id")
+
+        if not b64_data and att_id and service is not None and message_id:
+            try:
+                res = (
+                    service.users()
+                    .messages()
+                    .attachments()
+                    .get(userId="me", messageId=message_id, id=att_id)
+                    .execute()
+                )
+                b64_data = res.get("data", "")
+            except Exception as exc:
+                LOGGER.warning("Failed to download attachment %s for message %s: %s", att_id, message_id, exc)
+                continue
+
+        if not b64_data:
+            continue
+
+        raw_size = len(b64_data)
+        if total_bytes + raw_size > max_total_bytes:
+            LOGGER.warning("Exceeded max attachment payload size (%d bytes); skipping further attachments", max_total_bytes)
+            break
+
+        total_bytes += raw_size
+        downloaded.append({
+            "filename": att["filename"],
+            "mime_type": att["mime_type"],
+            "data": b64_data,
+            "size_bytes": att.get("size_bytes") or raw_size,
+        })
+
+    return downloaded
+
+
+def fetch_unread_emails(max_results: int = 10) -> List[Dict[str, Any]]:
     """Fetch unread emails from Gmail and return normalized dictionaries."""
     service = get_gmail_service()
     if service is None:
         return []
 
-    emails: List[Dict[str, str]] = []
+    emails: List[Dict[str, Any]] = []
 
     try:
         response = (
@@ -234,6 +333,7 @@ def fetch_unread_emails(max_results: int = 20) -> List[Dict[str, str]]:
                 headers = extract_headers(payload)
                 body = extract_body(payload) or message.get("snippet", "")
                 timestamp = headers.get("date") or _internal_date_to_iso(message.get("internalDate", ""))
+                attachments = extract_attachments(service=service, message_id=message_id, payload=payload)
 
                 emails.append(
                     {
@@ -242,6 +342,7 @@ def fetch_unread_emails(max_results: int = 20) -> List[Dict[str, str]]:
                         "subject": headers.get("subject", ""),
                         "body": body,
                         "timestamp": timestamp,
+                        "attachments": attachments,
                     }
                 )
             except HttpError as exc:

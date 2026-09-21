@@ -159,7 +159,7 @@ def _heuristic_extraction(
 def _model_candidates() -> List[str]:
     """Model candidates matching SalesAI V3 configurations."""
     configured = getattr(settings, "gemini_model", None) or os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
-    return [configured, "gemini-2.0-flash", "gemini-1.5-flash", "models/gemini-2.0-flash", "models/gemini-1.5-flash"]
+    return [configured, "gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
 
 def extract_memory_from_turn(

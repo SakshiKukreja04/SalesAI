@@ -22,17 +22,18 @@ import logging
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
 
 
 class QueryClass(str, Enum):
-    VALID          = "valid"
-    CONVERSATIONAL = "conversational"
-    GIBBERISH      = "gibberish"
-    OFF_TOPIC      = "off_topic"
-    SUSPICIOUS     = "suspicious"
+    VALID               = "valid"
+    CONVERSATIONAL      = "conversational"
+    GIBBERISH           = "gibberish"
+    OFF_TOPIC           = "off_topic"
+    SUSPICIOUS          = "suspicious"
+    ORDER_ITEM_MISMATCH = "order_item_mismatch"
 
 
 @dataclass
@@ -255,3 +256,65 @@ def inspect_query(query: str, *, use_llm_fallback: bool = True) -> GuardResult:
         return GuardResult(llm_class, "groq_classification", reply_map.get(llm_class))
 
     return GuardResult(QueryClass.VALID, "default_pass")
+
+
+def verify_visual_order_consistency(
+    visual_context: Optional[Any],
+    customer_orders: Optional[List[Dict[str, Any]]],
+    customer_name: str = "",
+    customer_message: str = "",
+) -> Optional[GuardResult]:
+    """Guardrail to verify if an attached product image matches customer's order history in Knowledge Graph.
+    
+    If customer sends an image/message of an un-ordered item (e.g. crop top) claiming damage/defect/return,
+    flags the mismatch and returns a polite deflection requesting the Order ID to prevent wrongful processing.
+    """
+    if not visual_context or not getattr(visual_context, "has_images", False):
+        return None
+
+    det_product = getattr(visual_context, "detected_product_name", None) or "attached item"
+    matches_order = getattr(visual_context, "matches_order_history", None)
+
+    # If the visual/order analysis explicitly confirmed no match against order history
+    if matches_order is False:
+        greeting = f"Hi {customer_name},\n\n" if customer_name and customer_name.strip() else "Hi,\n\n"
+        
+        # Build concise list of placed items from Knowledge Graph
+        ordered_items = []
+        if customer_orders:
+            for o in customer_orders[:4]:
+                onum = o.get("order_number") or "Order"
+                pnames = [p.get("name") for p in o.get("products", []) if p.get("name")]
+                if pnames:
+                    ordered_items.append(f"{onum} ({', '.join(pnames[:2])})")
+
+        orders_summary = ", ".join(ordered_items) if ordered_items else ""
+
+        if orders_summary:
+            order_info_text = f"We reviewed your query regarding the {det_product}. However, according to our records, the active orders registered under this account are: {orders_summary}."
+        else:
+            order_info_text = f"We reviewed your query regarding the {det_product}. However, we could not find any active orders registered under this email address."
+
+        reply = (
+            f"{greeting}"
+            f"Thank you for contacting ShopiFyX.\n\n"
+            f"{order_info_text}\n\n"
+            "If this product was purchased under a different email address or if you have an Order ID (e.g., ORD-XXXX), please reply with your Order ID so our support team can quickly locate your order and assist you.\n\n"
+            "Best regards,\n"
+            "Customer Support Team\n"
+            "ShopiFyX"
+        )
+        LOGGER.warning(
+            "ORDER_ITEM_MISMATCH guardrail triggered: attached '%s' does not match orders (%s)",
+            det_product,
+            orders_summary or "None",
+        )
+        return GuardResult(
+            classification=QueryClass.ORDER_ITEM_MISMATCH,
+            reason=f"Attached item '{det_product}' does not match customer's placed orders",
+            suggested_reply=reply,
+        )
+
+    return None
+
+

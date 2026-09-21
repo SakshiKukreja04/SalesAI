@@ -62,4 +62,28 @@ export const activateUser = async (payload) => {
   return response?.data?.user
 }
 
+export const fetchCustomerIssues = async ({ status = '', limit = 100 } = {}) => {
+  const params = { limit }
+  if (status) {
+    params.status = status
+  }
+  const response = await apiClient.get('/api/issues', { params })
+  return response?.data?.issues || []
+}
+
+export const updateCustomerIssue = async (issueId, payload) => {
+  const response = await apiClient.patch(`/api/issues/${issueId}`, payload)
+  return response?.data
+}
+
+export const triggerRefundAction = async (payload) => {
+  const response = await apiClient.post('/api/action/refund', payload)
+  return response?.data
+}
+
+export const triggerExchangeAction = async (payload) => {
+  const response = await apiClient.post('/api/action/exchange', payload)
+  return response?.data
+}
+
 export default apiClient

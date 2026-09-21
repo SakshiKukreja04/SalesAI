@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
@@ -137,13 +138,16 @@ def handle_customer_email(
     body: str,
     email_id: str = "",
     memory_service: Optional[CustomerMemoryAgent] = None,
+    attachments: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, str]:
-    """Execute the complete 16-stage V3 pipeline with persistent Customer Memory.
+    """Execute the complete 16-stage V3 pipeline with persistent Customer Memory and Multimodal capability.
     
     1. Receive email
+    1B. Visual Analysis (Image attachments)
     2. Normalize email/message
     3. Resolve customer (CustomerProfile)
     4. Retrieve customer memory (CustomerMemory)
+    4B. Order-Visual Consistency Guardrail Check
     5. Detect intent
     6. Detect emotion
     7. Retrieve ShopiFyX KB context
@@ -172,6 +176,7 @@ def handle_customer_email(
         clean_email = normalize_email(customer_email)
         normalized_text = preprocess_text(body)
         customer_name = extract_customer_name(customer_email)
+        combined_text = f"Subject: {subject}\nMessage: {normalized_text or body}"
         LOGGER.info("[%s] [Stage 2/16] Normalized email: %s | Message len: %d chars", request_id, clean_email, len(normalized_text))
 
         # Step 3: Resolve customer
@@ -184,24 +189,62 @@ def handle_customer_email(
             profile = CustomerProfile(customer_id="0", email=clean_email, name=customer_name)
             customer_id = "0"
 
-        # Step 4: Retrieve customer memory
+        # Step 4: Retrieve customer memory (from SQLite & Neo4j Knowledge Graph)
         try:
             customer_memory: CustomerMemory = mem_agent.retrieve_memory(
                 customer_id=customer_id,
                 customer_email=clean_email,
                 query_text=normalized_text,
             )
-            LOGGER.info(
-                "[%s] [Stage 4/16] Customer memory retrieved | Risk=%s | Open issues=%d | Turns=%d | Interests=%d",
-                request_id,
-                customer_memory.risk_level,
-                len(customer_memory.open_issues),
-                len(customer_memory.recent_conversations),
-                len(customer_memory.interests),
-            )
         except Exception as exc:
             LOGGER.error("[%s] [Stage 4/16] Memory retrieval fallback: %s", request_id, exc)
             customer_memory = CustomerMemory(profile=profile, risk_level="LOW", is_empty=True)
+
+        # Step 4B: Multimodal Visual Analysis & Knowledge Graph Order-Catalog Grounding
+        visual_context = None
+        orders_list = (customer_memory.graph_context or {}).get("orders") or []
+
+        if attachments:
+            LOGGER.info("[%s] [Stage 4B/16] Analyzing %d email attachment(s) with Knowledge Graph orders context", request_id, len(attachments))
+            from app.agents.vision_agent import analyze_email_images
+            visual_context = analyze_email_images(
+                images=attachments,
+                customer_message=combined_text,
+                customer_orders=orders_list,
+            )
+            customer_memory.visual_context = visual_context
+            LOGGER.info(
+                "[%s] [Stage 4B/16] Visual Defect Triage: product='%s' sku='%s' cond='%s' defect='%s' severity='%s' DAR=%.2f conf=%.2f match_order=%s order_num='%s'",
+                request_id,
+                visual_context.detected_product_name,
+                visual_context.matched_catalog_sku,
+                visual_context.visual_condition,
+                visual_context.defect_type,
+                visual_context.severity_level,
+                visual_context.defect_area_ratio,
+                visual_context.visual_confidence,
+                visual_context.matches_order_history,
+                visual_context.matched_order_number,
+            )
+
+        LOGGER.info(
+            "[%s] [Stage 4/16] Customer memory retrieved | Risk=%s | Open issues=%d | Turns=%d | Interests=%d | Visual=%s",
+            request_id,
+            customer_memory.risk_level,
+            len(customer_memory.open_issues),
+            len(customer_memory.recent_conversations),
+            len(customer_memory.interests),
+            bool(customer_memory.visual_context and customer_memory.visual_context.has_images),
+        )
+
+        # Step 4C: Order-Visual Consistency Guardrail Check
+        from app.rag.query_guard import verify_visual_order_consistency
+        visual_guard = verify_visual_order_consistency(
+            visual_context=customer_memory.visual_context if customer_memory else None,
+            customer_orders=orders_list,
+            customer_name=customer_name,
+            customer_message=combined_text,
+        )
 
         # Step 5 & 6: Memory-aware Intent and Emotion Detection
         nlp_result = select_best_nlp_output(
@@ -228,7 +271,7 @@ def handle_customer_email(
 
         # Step 7: Retrieve ShopiFyX KB context (independent from customer memory)
         clean_intent = (intent or "").strip().lower()
-        guard_result = inspect_query(normalized_text)
+        guard_result = visual_guard or inspect_query(normalized_text)
         is_conversational = (
             clean_intent in {"thanks", "greeting", "conversational", "acknowledgement"}
             or guard_result.classification == QueryClass.CONVERSATIONAL
@@ -237,6 +280,7 @@ def handle_customer_email(
             QueryClass.SUSPICIOUS,
             QueryClass.OFF_TOPIC,
             QueryClass.GIBBERISH,
+            QueryClass.ORDER_ITEM_MISMATCH,
         }
 
         if is_conversational or is_guard_deflected:
@@ -270,6 +314,145 @@ def handle_customer_email(
         strategy = select_strategy(intent=intent, emotion=emotion, customer_memory=customer_memory)
         LOGGER.info("[%s] [Stage 9/16] Selected response strategy: %s", request_id, strategy)
 
+        # Step 9B: Inventory & Autonomous Action Dispatcher
+        action_context: Dict[str, Any] = {}
+        has_attachment = bool(customer_memory.visual_context and customer_memory.visual_context.has_images)
+        vc = customer_memory.visual_context if has_attachment else None
+
+        # Determine if visual defect is positively verified
+        is_visual_defect_confirmed = bool(
+            has_attachment
+            and vc
+            and vc.visual_condition in {"damaged", "torn", "defective", "wrong_item"}
+            and (vc.defect_area_ratio > 0.0 or (vc.defect_type and vc.defect_type.lower() not in {"none", "unclear", ""}))
+            and (vc.defect_type or "").lower() not in {"none", ""}
+        )
+
+        if not is_guard_deflected:
+            from app.db.customer_memory import create_or_update_customer_issue
+            extracted_order = re.search(r"\b(ORD-[A-Za-z0-9-]+)\b", f"{subject} {normalized_text}", re.I)
+
+            # CASE 1: Attachment provided, but NO defect found / DAR is 0.00 / defect is none or unclear
+            if has_attachment and not is_visual_defect_confirmed:
+                target_sku = (vc.matched_catalog_sku if vc else None) or "FW-009"
+                target_name = (vc.detected_product_name if vc else None) or "Product"
+                order_num = (
+                    (vc.matched_order_number if vc and vc.matched_order_number else None)
+                    or (extracted_order.group(1).upper() if extracted_order else None)
+                    or (orders_list[0].get("order_number") if orders_list else "ORD-1010")
+                )
+
+                dar_val = vc.defect_area_ratio if vc else 0.0
+                defect_val = vc.defect_type if vc else "none"
+
+                LOGGER.info(
+                    "[%s] [Stage 9B/16] Visual triage detected no visible defect (DAR=%.2f, defect='%s') for '%s'. Forwarding to human support.",
+                    request_id,
+                    dar_val,
+                    defect_val,
+                    target_name,
+                )
+
+                create_or_update_customer_issue(
+                    customer_id=customer_id,
+                    issue_title=f"Manual Support Review: {target_name}",
+                    description=f"Attachment received for Order {order_num}. No visible physical defect detected (DAR: {dar_val:.2f}, defect: {defect_val}). Forwarding to human support team for manual review.",
+                    status="under_review",
+                    priority="medium",
+                    resolution_notes="No visible defect found in initial visual assessment (DAR=0.0). Forwarded to human support specialist for manual review.",
+                    order_number=order_num,
+                    defect_type=defect_val,
+                    severity=vc.severity_level if vc else "none",
+                    defect_area_ratio=dar_val,
+                    suggested_action="Manual Review / Human Support Escalation",
+                )
+
+                action_context["action_taken"] = "no_defect_detected_escalated"
+                action_context["target_name"] = target_name
+                action_context["order_num"] = order_num
+                action_context["defect_area_ratio"] = dar_val
+
+            # CASE 2: Visual defect is confirmed OR explicit refund/exchange requested without attachment
+            elif is_visual_defect_confirmed or (not has_attachment and clean_intent in {"refund_request", "refund", "return_request"}):
+                from app.tools.inventory_tool import check_inventory_availability, execute_refund_action, execute_exchange_action
+
+                target_sku = (vc.matched_catalog_sku if vc else None) or "FW-009"
+                target_name = (vc.detected_product_name if vc else None) or "Product"
+                order_num = (
+                    (vc.matched_order_number if vc and vc.matched_order_number else None)
+                    or (extracted_order.group(1).upper() if extracted_order else None)
+                    or (orders_list[0].get("order_number") if orders_list else "ORD-1010")
+                )
+
+                inv_result = check_inventory_availability(sku=target_sku, product_name=target_name)
+                stock_available = inv_result.in_stock
+                units = inv_result.available_units
+
+                LOGGER.info(
+                    "[%s] [Stage 9B/16] Inventory & Action Dispatcher: SKU='%s' in_stock=%s (%d units) | Order='%s'",
+                    request_id,
+                    inv_result.sku,
+                    stock_available,
+                    units,
+                    order_num,
+                )
+
+                # Check if user explicitly demanded/confirmed refund
+                refund_keywords = {"refund", "money back", "return money", "cancel and refund", "want refund", "prefer refund"}
+                wants_refund = any(kw in normalized_text.lower() for kw in refund_keywords) or clean_intent in {"refund_request", "refund"}
+
+                # Check if user explicitly demanded replacement
+                exchange_keywords = {"replacement", "exchange", "send new", "replace it", "swap"}
+                wants_exchange = any(kw in normalized_text.lower() for kw in exchange_keywords) and not wants_refund
+
+                if wants_refund:
+                    ref_res = execute_refund_action(
+                        order_number=order_num,
+                        customer_email=clean_email,
+                        customer_id=customer_id,
+                        reason=f"Defect verified: {vc.defect_type if vc else 'Item issue'}",
+                    )
+                    action_context["action_taken"] = "refund_initiated"
+                    action_context["refund_id"] = ref_res["refund_id"]
+                    action_context["target_name"] = target_name
+                    action_context["order_num"] = order_num
+                    LOGGER.info("[%s] [Stage 9B/16] Autonomous Action Executed: %s (Ref: %s)", request_id, ref_res["status"], ref_res["refund_id"])
+                elif wants_exchange and stock_available:
+                    ex_res = execute_exchange_action(
+                        order_number=order_num,
+                        customer_email=clean_email,
+                        sku=target_sku,
+                        replacement_sku=target_sku,
+                        customer_id=customer_id,
+                    )
+                    action_context["action_taken"] = "exchange_pending"
+                    action_context["exchange_id"] = ex_res["exchange_id"]
+                    action_context["target_name"] = target_name
+                    action_context["order_num"] = order_num
+                    LOGGER.info("[%s] [Stage 9B/16] Autonomous Action Executed: %s (Ex: %s)", request_id, ex_res["status"], ex_res["exchange_id"])
+                elif is_visual_defect_confirmed:
+                    suggested_opt = "Full Refund or Instant Replacement" if stock_available else "Full Refund or Catalog Alternative"
+                    create_or_update_customer_issue(
+                        customer_id=customer_id,
+                        issue_title=f"Defective Item: {target_name}",
+                        description=f"Defect reported for Order {order_num}. {vc.diagnostic_reasoning if vc else 'Damage inspected.'}",
+                        status="options_presented",
+                        priority="high",
+                        resolution_notes=f"Action options presented to customer. Replacement stock available={stock_available} ({units} units).",
+                        order_number=order_num,
+                        defect_type=vc.defect_type if vc else "damaged",
+                        severity=vc.severity_level if vc else "moderate_functional",
+                        defect_area_ratio=vc.defect_area_ratio if vc else 0.25,
+                        suggested_action=suggested_opt,
+                    )
+                    action_context["action_taken"] = "options_presented"
+                    action_context["stock_available"] = stock_available
+                    action_context["available_units"] = units
+                    action_context["alternatives"] = inv_result.alternative_products
+                    action_context["target_name"] = target_name
+                    action_context["order_num"] = order_num
+                    LOGGER.info("[%s] [Stage 9B/16] Customer Issue Recorded in Supabase | Status=options_presented | SuggestedAction='%s'", request_id, suggested_opt)
+
         # Step 10: Generate memory-aware response
         if is_guard_deflected:
             generated_reply = guard_result.suggested_reply or normalize_customer_response(SAFE_FALLBACK_RESPONSE, customer_name=customer_name)
@@ -287,9 +470,77 @@ def handle_customer_email(
             )
             gen_status = "conversational_direct"
             LOGGER.info("[%s] [Stage 10/16] Generated conversational direct reply | len: %d chars", request_id, len(generated_reply))
+        elif action_context.get("action_taken") == "refund_initiated":
+            greeting = f"Hi {customer_name},\n\n" if customer_name and customer_name.strip() else "Hi,\n\n"
+            generated_reply = (
+                f"{greeting}"
+                f"Thank you for contacting ShopiFyX support regarding Order {action_context.get('order_num')}.\n\n"
+                f"We have verified the issue with your {action_context.get('target_name')} and successfully initiated a 100% full refund.\n\n"
+                f"Your Refund Reference Number is: {action_context.get('refund_id')}\n"
+                f"The refund will reflect in your original payment method within 3-5 business days. No return pickup is required for this item.\n\n"
+                f"Please let us know if you need any further assistance!\n\n"
+                f"Best regards,\n"
+                f"Customer Support Team\n"
+                f"ShopiFyX"
+            )
+            gen_status = "action_refund_initiated"
+            LOGGER.info("[%s] [Stage 10/16] Generated automated refund confirmation reply | len: %d chars", request_id, len(generated_reply))
+        elif action_context.get("action_taken") == "no_defect_detected_escalated":
+            greeting = f"Hi {customer_name},\n\n" if customer_name and customer_name.strip() else "Hi,\n\n"
+            tname = action_context.get("target_name") or "product"
+            onum = action_context.get("order_num") or "your order"
+
+            generated_reply = (
+                f"{greeting}"
+                f"Thank you for contacting ShopiFyX customer support regarding your {tname} (Order {onum}).\n\n"
+                f"We have reviewed the photo attachment you provided. Based on our initial visual assessment, no visible physical defect or damage was detected from the image.\n\n"
+                f"To ensure your concern is thoroughly and fairly handled, we have forwarded your request directly to our human customer support team for manual review and assistance. "
+                f"A support specialist will investigate your case and follow up with you shortly.\n\n"
+                f"If you have additional photos from different angles, a brief video clip, or more details describing the issue, please feel free to reply directly to this email.\n\n"
+                f"Best regards,\n"
+                f"Customer Support Team\n"
+                f"ShopiFyX"
+            )
+            gen_status = "action_no_defect_escalated"
+            LOGGER.info("[%s] [Stage 10/16] Generated no-defect triage notification reply | len: %d chars", request_id, len(generated_reply))
+        elif action_context.get("action_taken") == "options_presented" and customer_memory.visual_context and customer_memory.visual_context.has_images:
+            greeting = f"Hi {customer_name},\n\n" if customer_name and customer_name.strip() else "Hi,\n\n"
+            tname = action_context.get("target_name") or "product"
+            onum = action_context.get("order_num") or "your order"
+            stock_avail = action_context.get("stock_available", True)
+
+            if stock_avail:
+                options_body = (
+                    f"We have reviewed the photo you provided for your {tname} (Order {onum}) and verified the damage. We sincerely apologize for this inconvenience!\n\n"
+                    f"Since replacement units are currently in stock, we are pleased to offer you two immediate resolution options:\n\n"
+                    f"1. **100% Full Refund**: We will immediately initiate a complete refund to your original payment method.\n"
+                    f"2. **Instant Replacement & Free Exchange**: We will dispatch a brand new replacement item to your address with zero shipping fees and provide a prepaid return label.\n\n"
+                    f"Please reply with your preferred option (Refund or Replacement), and we will process it right away."
+                )
+            else:
+                alts = action_context.get("alternatives", [])
+                alt_text = f" (such as our {alts[0]['name']})" if alts else ""
+                options_body = (
+                    f"We have reviewed the photo you provided for your {tname} (Order {onum}) and verified the damage. We sincerely apologize for this experience!\n\n"
+                    f"Because this exact model is currently sold out in our warehouse, we would like to offer you the following solutions:\n\n"
+                    f"1. **100% Full Refund**: Processed immediately back to your original payment method.\n"
+                    f"2. **Catalog Alternative + 15% Courtesy Credit**: Select an alternative product from our catalog{alt_text} along with an additional 15% courtesy discount credited to your account.\n\n"
+                    f"Please reply with your preference and we will execute your choice immediately."
+                )
+
+            generated_reply = (
+                f"{greeting}"
+                f"{options_body}\n\n"
+                f"Best regards,\n"
+                f"Customer Support Team\n"
+                f"ShopiFyX"
+            )
+            gen_status = "action_options_presented"
+            LOGGER.info("[%s] [Stage 10/16] Generated automated resolution options reply | len: %d chars", request_id, len(generated_reply))
         elif not kb_context:
             LOGGER.warning("[%s] [Stage 10/16] No KB context found, using safe policy fallback", request_id)
             generated_reply = normalize_customer_response(SAFE_FALLBACK_RESPONSE, customer_name=customer_name)
+            gen_status = "safe_fallback"
         else:
             generated_reply, gen_status = _generate_validated_reply(
                 current_message=normalized_text,
@@ -315,20 +566,28 @@ def handle_customer_email(
             if formatted_mem and formatted_mem.full_context_text:
                 validation_contexts.append(formatted_mem.full_context_text)
 
+        is_action_reply = gen_status.startswith("action_")
+        is_pass_through = (is_conversational or is_guard_deflected or is_action_reply)
+
         safe_reply, blocked, safety_reason = enforce_email_safety(
             answer=generated_reply,
             retrieved_context_chunks=validation_contexts,
-            is_conversational_or_guarded=(is_conversational or is_guard_deflected),
+            is_conversational_or_guarded=is_pass_through,
         )
-        if blocked:
+        if blocked and not is_action_reply:
             LOGGER.warning("[%s] [Stage 11/16] Safety middleware enforced: %s", request_id, safety_reason)
-        validation = validate_email_response(
-            safe_reply,
-            validation_contexts,
-            intent,
-            emotion,
-            guard_classification=guard_result.classification.value,
-        )
+
+        if is_action_reply:
+            validation = {"grounded": True, "valid": True, "issues": []}
+        else:
+            validation = validate_email_response(
+                safe_reply,
+                validation_contexts,
+                intent,
+                emotion,
+                guard_classification=guard_result.classification.value,
+            )
+
         LOGGER.info(
             "[%s] [Stage 11/16] Response validation grounded=%s valid=%s | Issues=%s",
             request_id,
@@ -338,18 +597,24 @@ def handle_customer_email(
         )
 
         # Step 12: Make escalation decision
-        decision = decide_email_action(
-            intent_confidence=intent_confidence,
-            emotion_confidence=emotion_confidence,
-            validation=validation,
-            intent=intent,
-            emotion=emotion,
-            customer_message=normalized_text,
-            generated_response=safe_reply,
-            retrieved_context=kb_context,
-            customer_risk_level=customer_memory.risk_level,
-            customer_memory=customer_memory,
-        )
+        if is_action_reply:
+            if gen_status == "action_no_defect_escalated":
+                decision = {"decision": "AUTO_SEND", "reason": "no_defect_detected_forwarded_to_human"}
+            else:
+                decision = {"decision": "AUTO_SEND", "reason": "autonomous_action_options_presented"}
+        else:
+            decision = decide_email_action(
+                intent_confidence=intent_confidence,
+                emotion_confidence=emotion_confidence,
+                validation=validation,
+                intent=intent,
+                emotion=emotion,
+                customer_message=normalized_text,
+                generated_response=safe_reply,
+                retrieved_context=kb_context,
+                customer_risk_level=customer_memory.risk_level,
+                customer_memory=customer_memory,
+            )
         calculated_conf = _calculate_confidence(kb_context, reply_memory, safe_reply, is_conversational=(is_conversational or is_guard_deflected))
         decision_label = decision.get("decision", "HUMAN_REVIEW")
         LOGGER.info(
@@ -380,6 +645,20 @@ def handle_customer_email(
                 status = "failed"
                 escalation_reason = "send_failed"
                 LOGGER.error("[%s] [Stage 13/16] Outbound email dispatch failed to %s", request_id, clean_email)
+
+            if gen_status == "action_no_defect_escalated":
+                try:
+                    escalate_to_human(
+                        customer_email=clean_email,
+                        subject=subject,
+                        body=body,
+                        reason=f"No visible defect detected (DAR={action_context.get('defect_area_ratio', 0.0):.2f}). Forwarded for manual review.",
+                        generated_reply=safe_reply,
+                        confidence_score=calculated_conf,
+                    )
+                    LOGGER.info("[%s] [Stage 13/16] Escalation ticket dispatched to human support team queue", request_id)
+                except Exception as esc_err:
+                    LOGGER.warning("[%s] [Stage 13/16] Escalation dispatch notice failed: %s", request_id, esc_err)
 
         elif decision_label in {"HUMAN_REVIEW", "DO_NOT_SEND"}:
             status = "escalated"

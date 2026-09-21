@@ -157,7 +157,37 @@ def format_customer_memory(
             joined_interests = joined_interests[:MAX_INTERESTS_CHARS] + "..."
         interests_text = "PRODUCT INTERESTS:\n" + joined_interests
 
-    # 6. Semantic Past Interactions (Priority 3 - deduplicated)
+    # 6. Visual Attachment Context (Strictly bounded)
+    visual_text = ""
+    if getattr(memory, "visual_context", None) and memory.visual_context.has_images:
+        vc = memory.visual_context
+        v_parts = []
+        if vc.detected_product_name:
+            v_parts.append(f"Product: {vc.detected_product_name}")
+        if vc.matched_catalog_sku:
+            v_parts.append(f"SKU: {vc.matched_catalog_sku}")
+        if vc.visual_condition and vc.visual_condition != "unclear":
+            v_parts.append(f"Condition: {vc.visual_condition}")
+        if vc.defect_type and vc.defect_type != "none":
+            v_parts.append(f"DefectType: {vc.defect_type}")
+        if vc.severity_level and vc.severity_level != "none":
+            v_parts.append(f"Severity: {vc.severity_level}")
+        if vc.defect_area_ratio > 0:
+            v_parts.append(f"DAR: {vc.defect_area_ratio:.2f}")
+        if vc.diagnostic_reasoning:
+            v_parts.append(f"Diagnostic: {vc.diagnostic_reasoning[:60]}")
+        elif vc.defect_description:
+            v_parts.append(f"Defect: {vc.defect_description[:60]}")
+        if vc.matches_order_history is not None:
+            v_parts.append(f"OrderMatch: {vc.matches_order_history}")
+        if vc.matched_order_number:
+            v_parts.append(f"Order: {vc.matched_order_number}")
+        if v_parts:
+            visual_text = "VISUAL ATTACHMENT EVIDENCE:\n- " + " | ".join(v_parts)
+            if len(visual_text) > 300:
+                visual_text = visual_text[:300] + "..."
+
+    # 7. Semantic Past Interactions (Priority 3 - deduplicated)
     semantic_lines = []
     if memory.relevant_interactions:
         for inter in memory.relevant_interactions:
@@ -174,7 +204,7 @@ def format_customer_memory(
             joined_semantic = joined_semantic[:MAX_SEMANTIC_CHARS] + "..."
         semantic_text = "RELEVANT PREVIOUS INTERACTIONS:\n" + joined_semantic
 
-    # 7. Previous AI Reply Patterns (if relevant and not duplicated)
+    # 8. Previous AI Reply Patterns (if relevant and not duplicated)
     reply_pattern_lines = []
     if memory.previous_replies:
         for rep in memory.previous_replies[:2]:
@@ -187,17 +217,18 @@ def format_customer_memory(
         reply_patterns_text = "PREVIOUS RESPONSE PATTERNS:\n" + "\n".join(reply_pattern_lines)
 
     # Assemble full context respecting max memory budget
-    sections = [s for s in [profile_text, graph_text, issues_text, history_text, interests_text, semantic_text, reply_patterns_text] if s]
+    sections = [s for s in [profile_text, graph_text, visual_text, issues_text, history_text, interests_text, semantic_text, reply_patterns_text] if s]
     full_context = "\n\n".join(sections)
     
     if len(full_context) > MAX_TOTAL_MEMORY_CHARS:
-        # Fallback to essential sections (Profile + Graph + Issues + History)
-        essential = [s for s in [profile_text, graph_text, issues_text, history_text] if s]
+        # Fallback to essential sections (Profile + Graph + Visual + Issues + History)
+        essential = [s for s in [profile_text, graph_text, visual_text, issues_text, history_text] if s]
         full_context = "\n\n".join(essential)
 
     return FormattedMemoryContext(
         profile_text=profile_text,
         graph_context_text=graph_text,
+        visual_context_text=visual_text,
         recent_history_text=history_text,
         open_issues_text=issues_text,
         product_interests_text=interests_text,
@@ -205,3 +236,4 @@ def format_customer_memory(
         reply_patterns_text=reply_patterns_text,
         full_context_text=full_context,
     )
+

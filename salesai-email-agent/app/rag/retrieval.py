@@ -1,5 +1,7 @@
 """Retrieval helpers for fetching relevant knowledge from ChromaDB with Hybrid Dense + BM25 and RRF."""
 
+from app.rag.chroma_store import ensure_user_collection
+from app.rag.chroma_store import ensure_collection
 from dataclasses import dataclass
 import json
 import logging
@@ -8,21 +10,26 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 from app.config import settings
-# pyrefly: ignore [missing-import]
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-# pyrefly: ignore [missing-import]
-import chromadb
-from rank_bm25 import BM25Okapi
-
-from app.rag.chroma_store import ensure_collection, ensure_user_collection
-# Re-export QueryGuard so callers can do: from app.rag.retrieval import inspect_query, QueryClass
-from app.rag.query_guard import inspect_query, QueryClass, GuardResult  # noqa: F401
-
 
 LOGGER = logging.getLogger(__name__)
-embedding_fn = DefaultEmbeddingFunction()
-LOGGER.info("Using ONNX retrieval model: all-MiniLM-L6-v2 via DefaultEmbeddingFunction")
-_client = chromadb.PersistentClient(path=settings.chroma_path)
+
+try:
+    from rank_bm25 import BM25Okapi
+except ImportError:
+    BM25Okapi = None
+
+try:
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    embedding_fn = DefaultEmbeddingFunction()
+    _client = chromadb.PersistentClient(path=settings.chroma_path)
+    LOGGER.info("Using ONNX retrieval model: all-MiniLM-L6-v2 via DefaultEmbeddingFunction")
+except (ImportError, Exception):
+    chromadb = None
+    DefaultEmbeddingFunction = None
+    embedding_fn = None
+    _client = None
+    LOGGER.warning("chromadb not initialized in environment, using keyword fallback for RAG")
 
 _CRITICAL_KEYWORDS = {"refund", "return", "shipping", "delivery", "warranty", "exchange", "bluedart", "cod", "upi"}
 _BM25_TOKEN_RE = re.compile(r"\b[a-zA-Z0-9_-]+\b")
@@ -370,6 +377,10 @@ def retrieve_relevant_chunks(
     use_crag: bool = True,
 ) -> RetrievalResult:
     """Retrieve and filter knowledge chunks using Hybrid Dense + BM25, HyDE, and CRAG grading."""
+    if _client is None:
+        LOGGER.debug("Chroma client unavailable, returning empty knowledge retrieval result")
+        return RetrievalResult(chunks=[], fallback_relaxed=True)
+
     collection = _client.get_or_create_collection(
         name="salesai_knowledge_v2",
         embedding_function=embedding_fn

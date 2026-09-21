@@ -42,6 +42,22 @@ export default function Sidebar({ isAdmin, assignedIntents = [], expanded, onTog
           {expanded ? 'Emails' : 'E'}
         </NavLink>
 
+        <NavLink
+          to="/issues"
+          className={({ isActive }) =>
+            `${linkBase} ${isActive ? 'bg-slate-900 text-white' : 'text-slate-700'}`
+          }
+        >
+          <div className="flex w-full items-center justify-between">
+            <span>{expanded ? 'Open Issues' : 'I'}</span>
+            {expanded && (
+              <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">
+                Live
+              </span>
+            )}
+          </div>
+        </NavLink>
+
         <div className="pt-2">
           <p className={`px-3 text-xs uppercase tracking-wider text-slate-400 ${expanded ? '' : 'text-center'}`}>
             {expanded ? 'Intents' : 'I'}

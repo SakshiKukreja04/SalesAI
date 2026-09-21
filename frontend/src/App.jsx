@@ -9,6 +9,7 @@ import DashboardPage from './pages/Dashboard'
 import EmailsPage from './pages/emails'
 import HomePage from './pages/home'
 import IntentView from './pages/intent/IntentView'
+import OpenIssuesPage from './pages/issues'
 import LoginPage from './pages/login'
 import SignupPage from './pages/signup'
 import TeamManagementPage from './pages/team'
@@ -86,6 +87,7 @@ export default function App() {
       >
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/emails" element={<EmailsPage />} />
+        <Route path="/issues" element={<OpenIssuesPage />} />
         <Route path="/intent/:intent" element={<IntentView />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
         <Route

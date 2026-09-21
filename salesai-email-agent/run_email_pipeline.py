@@ -12,7 +12,7 @@ This script demonstrates:
 import logging
 import re
 import time
-from typing import Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from app.agents.orchestrator import handle_customer_email
 from app.db.supabase_client import (
@@ -136,7 +136,13 @@ def load_processed_emails_from_database() -> None:
         logger.exception("Failed to load processed emails from database: %s", exc)
 
 
-def safe_send_email(email_id: str, customer_email: str, subject: str, body: str) -> dict:
+def safe_send_email(
+    email_id: str,
+    customer_email: str,
+    subject: str,
+    body: str,
+    attachments: Optional[List[Dict[str, Any]]] = None,
+) -> dict:
     """Process and send with strict idempotency guards.
 
     Guard sequence:
@@ -164,6 +170,7 @@ def safe_send_email(email_id: str, customer_email: str, subject: str, body: str)
         subject=subject,
         body=body,
         email_id=email_id,
+        attachments=attachments,
     )
 
     final_status = result.get("status", "failed")
@@ -233,6 +240,7 @@ def _process_email(email: Dict[str, str]) -> Dict[str, str]:
         "timestamp": timestamp,
         "intent": intent,
         "emotion": emotion,
+        "attachments": email.get("attachments") or [],
     }
 
     return processed
@@ -271,7 +279,7 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
         logger.info("Polling Gmail Inbox... (processed so far: %d)", len(processed_email_ids))
 
         try:
-            emails: List[Dict[str, str]] = fetch_unread_emails()
+            emails: List[Dict[str, Any]] = fetch_unread_emails()
         except Exception:
             logger.exception("Failed to fetch unread emails")
             if not poll_forever:
@@ -330,8 +338,9 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
                     customer_name = extract_customer_name(from_header)
                     subject = processed.get("subject", "")
                     body = processed.get("body", "")
+                    attachments = processed.get("attachments") or []
 
-                    logger.info("Processing email from %s: %s", customer_name, subject)
+                    logger.info("Processing email from %s: %s (attachments: %d)", customer_name, subject, len(attachments))
                     
                     # Generate and send with durable idempotency protection.
                     result = safe_send_email(
@@ -339,6 +348,7 @@ def run_email_pipeline(interval: int = 30, poll_forever: bool = False) -> None:
                         customer_email=customer_email,
                         subject=subject,
                         body=body,
+                        attachments=attachments,
                     )
 
                     if result.get("status") in {"replied", "escalated"}:

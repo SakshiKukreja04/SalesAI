@@ -1,29 +1,30 @@
-"""ChromaDB setup and document indexing utilities."""
-
 from hashlib import sha256
 import logging
-import re
+import os
 from pathlib import Path
-from typing import Dict, List
-
-
-# pyrefly: ignore [missing-import]
-import chromadb
-# pyrefly: ignore [missing-import]
-from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
-
+import re
+from typing import Dict, List, Optional
 
 from app.config import settings
 
-
-
 LOGGER = logging.getLogger(__name__)
-_client = chromadb.PersistentClient(path=settings.chroma_path)
+
+try:
+    import chromadb
+    from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
+    _client = chromadb.PersistentClient(path=settings.chroma_path)
+    embedding_fn = DefaultEmbeddingFunction()
+    LOGGER.info("Using ONNX embedding model: all-MiniLM-L6-v2 via DefaultEmbeddingFunction")
+except (ImportError, Exception):
+    chromadb = None
+    DefaultEmbeddingFunction = None
+    _client = None
+    embedding_fn = None
+    LOGGER.warning("chromadb not installed in environment, using fallback knowledge retrieval")
+
 _collection = None
 _reply_collection = None
 _user_collection = None
-embedding_fn = DefaultEmbeddingFunction()
-LOGGER.info("Using ONNX embedding model: all-MiniLM-L6-v2 via DefaultEmbeddingFunction")
 
 _REFUND_FILENAMES = {"refund", "refund_policy", "returns", "return_policy"}
 _TOKEN_RE = re.compile(r"\w+|[^\w\s]", re.UNICODE)

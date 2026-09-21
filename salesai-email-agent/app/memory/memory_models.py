@@ -40,9 +40,14 @@ class CustomerIssue:
     customer_id: Union[str, int] = ""
     issue_title: str = ""
     description: str = ""
-    status: str = "open"  # open, resolved, escalated
+    status: str = "open"  # open, options_presented, refund_initiated, exchange_pending, resolved, escalated
     priority: str = "medium"  # low, medium, high, urgent
     resolution_notes: str = ""
+    order_number: Optional[str] = None
+    defect_type: Optional[str] = None
+    severity: Optional[str] = None
+    defect_area_ratio: Optional[float] = None
+    suggested_action: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     resolved_at: Optional[datetime] = None
@@ -56,6 +61,11 @@ class CustomerIssue:
             "status": self.status,
             "priority": self.priority,
             "resolution_notes": self.resolution_notes,
+            "order_number": self.order_number,
+            "defect_type": self.defect_type,
+            "severity": self.severity,
+            "defect_area_ratio": self.defect_area_ratio,
+            "suggested_action": self.suggested_action,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "resolved_at": self.resolved_at.isoformat() if self.resolved_at else None,
@@ -135,6 +145,50 @@ class ConversationRecord:
 
 
 @dataclass
+class VisualContext:
+    """Structured visual analysis of email image attachments."""
+
+    has_images: bool = False
+    image_count: int = 0
+    detected_product_name: Optional[str] = None
+    detected_category: Optional[str] = None
+    matched_catalog_sku: Optional[str] = None
+    is_catalog_product: bool = False
+    visual_condition: str = "intact"  # intact, damaged, torn, wrong_item, defective, unclear
+    defect_type: str = "none"  # e.g., sole_delamination, torn_seam, cracked_screen, wrong_item, cosmetic_scratch, stain, none
+    severity_level: str = "none"  # severe_unusable, moderate_functional, minor_cosmetic, none
+    defect_area_ratio: float = 0.0  # 0.0 to 1.0 (Vectra DAR metric)
+    diagnostic_reasoning: str = ""
+    defect_description: str = ""
+    is_receipt_or_invoice: bool = False
+    visual_confidence: float = 0.0
+    summary: str = ""
+    matches_order_history: Optional[bool] = None
+    matched_order_number: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "has_images": self.has_images,
+            "image_count": self.image_count,
+            "detected_product_name": self.detected_product_name,
+            "detected_category": self.detected_category,
+            "matched_catalog_sku": self.matched_catalog_sku,
+            "is_catalog_product": self.is_catalog_product,
+            "visual_condition": self.visual_condition,
+            "defect_type": self.defect_type,
+            "severity_level": self.severity_level,
+            "defect_area_ratio": self.defect_area_ratio,
+            "diagnostic_reasoning": self.diagnostic_reasoning,
+            "defect_description": self.defect_description,
+            "is_receipt_or_invoice": self.is_receipt_or_invoice,
+            "visual_confidence": self.visual_confidence,
+            "summary": self.summary,
+            "matches_order_history": self.matches_order_history,
+            "matched_order_number": self.matched_order_number,
+        }
+
+
+@dataclass
 class CustomerMemory:
     """Aggregated customer context retrieved before response generation."""
 
@@ -151,6 +205,7 @@ class CustomerMemory:
     repeat_issue_intent: Optional[str] = None
     graph_context: Optional[Dict[str, Any]] = None
     graph_context_text: str = ""
+    visual_context: Optional[VisualContext] = None
     is_empty: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -168,6 +223,7 @@ class CustomerMemory:
             "repeat_issue_intent": self.repeat_issue_intent,
             "graph_context": self.graph_context,
             "graph_context_text": self.graph_context_text,
+            "visual_context": self.visual_context.to_dict() if self.visual_context else None,
             "is_empty": self.is_empty,
         }
 
@@ -201,9 +257,11 @@ class FormattedMemoryContext:
 
     profile_text: str = ""
     graph_context_text: str = ""
+    visual_context_text: str = ""
     recent_history_text: str = ""
     open_issues_text: str = ""
     product_interests_text: str = ""
     relevant_interactions_text: str = ""
     reply_patterns_text: str = ""
     full_context_text: str = ""
+
